@@ -1,0 +1,433 @@
+"""
+Integration with MSAccess VCS Add-in via COM automation.
+
+This module provides a lightweight wrapper around the MSAccess VCS add-in,
+delegating all export/import/build operations to the battle-tested add-in
+rather than reimplementing them in Python.
+"""
+
+import os
+from pathlib import Path
+from typing import Any, Optional
+
+try:
+    import win32com.client
+    COM_AVAILABLE = True
+except ImportError:
+    COM_AVAILABLE = False
+
+
+def get_access_info(app) -> dict[str, Any]:
+    """
+    Get Access application version and bitness.
+    
+    Args:
+        app: Access Application COM object
+        
+    Returns:
+        Dictionary with access_version and bitness
+    """
+    try:
+        # Get Access version (e.g., "16.0", "15.0", "14.0")
+        access_version = app.Version
+        
+        # Detect bitness - Access itself reports if it's 64-bit
+        # We can check the build number or system architecture
+        try:
+            # Try to check if we're running in 64-bit mode
+            # In 64-bit Access, VBE version is typically 7.1, in 32-bit it's 7.0
+            import platform
+            import sys
+            
+            # Check Python's architecture (which should match Access if they're compatible)
+            is_64bit = sys.maxsize > 2**32
+            bitness = "64-bit" if is_64bit else "32-bit"
+        except Exception:
+            bitness = "unknown"
+        
+        return {
+            "access_version": access_version,
+            "bitness": bitness
+        }
+    except Exception as e:
+        return {
+            "access_version": "unknown",
+            "bitness": "unknown",
+            "error": str(e)
+        }
+
+
+class VCSAddinIntegration:
+    """
+    Integration layer for MSAccess VCS add-in.
+    
+    This class handles:
+    - Loading the VCS add-in into Access
+    - Calling add-in API functions via Application.Run
+    - Translating between MCP and add-in formats
+    - Parsing results from add-in operations
+    """
+    
+    def __init__(self, addin_path: Optional[str] = None):
+        """
+        Initialize add-in integration.
+        
+        Args:
+            addin_path: Path to VCS add-in file (.accda). If None, uses default location.
+        """
+        if not COM_AVAILABLE:
+            raise ImportError(
+                "pywin32 is required for COM automation. "
+                "Install it with: pip install pywin32"
+            )
+        
+        self.addin_path = addin_path or self._get_default_addin_path()
+        self._app = None
+        self._addin_loaded = False
+    
+    def _get_default_addin_path(self) -> str:
+        """
+        Get default VCS add-in installation path.
+        
+        Returns:
+            Path to add-in file (may not exist)
+        """
+        # Default installation location: %AppData%\MSAccessVCS\Version Control.accda
+        appdata = os.environ.get("APPDATA", "")
+        return os.path.join(appdata, "MSAccessVCS", "Version Control.accda")
+    
+    def verify_addin_exists(self) -> bool:
+        """
+        Check if add-in file exists at configured path.
+        
+        Returns:
+            True if add-in file exists
+        """
+        return os.path.isfile(self.addin_path)
+    
+    def load_addin(self, app) -> bool:
+        """
+        Verify add-in is accessible via Application.Run.
+        
+        Note: The add-in doesn't need to be explicitly "loaded" - Access will
+        load it automatically when we call Application.Run. However, the target
+        database must be open first.
+        
+        Args:
+            app: Access Application COM object (with a database open)
+            
+        Returns:
+            True if add-in can be called successfully
+            
+        Raises:
+            RuntimeError: If add-in cannot be accessed
+        """
+        if not self.verify_addin_exists():
+            raise RuntimeError(
+                f"VCS add-in not found at: {self.addin_path}\n"
+                f"Please install the MSAccess VCS add-in or set ACCESS_VCS_ADDIN_PATH.\n"
+                f"Download from: https://github.com/joyfullservice/msaccess-vcs-integration/releases"
+            )
+        
+        try:
+            # Store app reference
+            self._app = app
+            
+            # Call a simple function to verify add-in is accessible
+            # Format: Path without extension + "." + Function name
+            # Example: "C:\Path\Version Control.Preload"
+            addin_lib_name = os.path.splitext(self.addin_path)[0]
+            app.Run(f'{addin_lib_name}.Preload')
+            
+            self._addin_loaded = True
+            return True
+            
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to call VCS add-in function: {e}\n"
+                f"Ensure a database is open and the add-in is trusted by Access."
+            )
+    
+    def _call_addin_function(self, function_name: str, *args) -> Any:
+        """
+        Call a function in the VCS add-in.
+        
+        Note: A database must be open in the Access application before calling
+        add-in functions. The add-in is loaded automatically by Access when called.
+        
+        Args:
+            function_name: Name of function to call (e.g., "HandleRibbonCommand", "GetVCSVersion")
+            *args: Arguments to pass to function
+            
+        Returns:
+            Result from add-in function
+            
+        Raises:
+            RuntimeError: If call fails
+        """
+        try:
+            # Format: Path without extension + "." + Function name
+            # Example: "C:\Path\Version Control.GetVCSVersion"
+            addin_lib_name = os.path.splitext(self.addin_path)[0]
+            full_function_name = f'{addin_lib_name}.{function_name}'
+            
+            # Call the function with provided arguments
+            if args:
+                result = self._app.Run(full_function_name, *args)
+            else:
+                result = self._app.Run(full_function_name)
+            
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to call add-in function '{function_name}': {e}\n"
+                f"Ensure a database is open and the add-in path is correct."
+            )
+    
+    def _get_export_folder(self, db_path: str, source_folder: Optional[str] = None) -> str:
+        """
+        Determine export folder path.
+        
+        Args:
+            db_path: Path to database file
+            source_folder: Optional explicit source folder path
+            
+        Returns:
+            Path to export folder
+        """
+        if source_folder:
+            return source_folder
+        
+        # Default: database_name.src folder next to database
+        db_file = Path(db_path)
+        return str(db_file.parent / f"{db_file.stem}.src")
+    
+    def export_source(
+        self,
+        db_path: str,
+        source_folder: Optional[str] = None,
+        full_export: bool = False
+    ) -> dict[str, Any]:
+        """
+        Export database to source files using VCS add-in.
+        
+        Args:
+            db_path: Path to Access database
+            source_folder: Optional custom export folder (default: db_name.src)
+            full_export: If True, force full export; if False, use fast save
+            
+        Returns:
+            Dictionary with export results:
+            - success: Boolean
+            - export_path: Path where files were exported
+            - log_path: Path to Export.log file
+            - message: Status message
+        """
+        export_path = self._get_export_folder(db_path, source_folder)
+        
+        try:
+            # The add-in uses HandleRibbonCommand with button IDs
+            # btnExport triggers the main export function
+            self._call_addin_function("HandleRibbonCommand", "btnExport")
+            
+            # Check for log file to confirm export completed
+            log_path = os.path.join(export_path, "Export.log")
+            
+            return {
+                "success": True,
+                "export_path": export_path,
+                "log_path": log_path if os.path.exists(log_path) else None,
+                "message": "Export completed successfully"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "export_path": export_path,
+                "log_path": None,
+                "message": f"Export failed: {e}"
+            }
+    
+    def export_vba(self, db_path: str, source_folder: Optional[str] = None) -> dict[str, Any]:
+        """
+        Export only VBA components (modules, class modules).
+        
+        Args:
+            db_path: Path to Access database
+            source_folder: Optional custom export folder
+            
+        Returns:
+            Dictionary with export results
+        """
+        export_path = self._get_export_folder(db_path, source_folder)
+        
+        try:
+            self._call_addin_function("HandleRibbonCommand", "btnExportVBA")
+            
+            log_path = os.path.join(export_path, "Export.log")
+            
+            return {
+                "success": True,
+                "export_path": export_path,
+                "log_path": log_path if os.path.exists(log_path) else None,
+                "message": "VBA export completed successfully"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "export_path": export_path,
+                "log_path": None,
+                "message": f"VBA export failed: {e}"
+            }
+    
+    def merge_build(self, db_path: str, source_folder: Optional[str] = None) -> dict[str, Any]:
+        """
+        Merge source files into existing database.
+        
+        This updates modified objects without rebuilding the entire database.
+        
+        Args:
+            db_path: Path to Access database
+            source_folder: Optional custom source folder
+            
+        Returns:
+            Dictionary with build results:
+            - success: Boolean
+            - database_path: Path to database
+            - log_path: Path to Build.log file
+            - message: Status message
+        """
+        source_path = self._get_export_folder(db_path, source_folder)
+        
+        try:
+            # MergeBuild is exposed via VCS() API
+            # We need to call it via HandleRibbonCommand
+            self._call_addin_function("HandleRibbonCommand", "btnMergeBuild")
+            
+            log_path = os.path.join(source_path, "Build.log")
+            
+            return {
+                "success": True,
+                "database_path": db_path,
+                "log_path": log_path if os.path.exists(log_path) else None,
+                "message": "Merge build completed successfully"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "database_path": db_path,
+                "log_path": None,
+                "message": f"Merge build failed: {e}"
+            }
+    
+    def build_from_source(
+        self,
+        source_folder: str,
+        output_path: Optional[str] = None
+    ) -> dict[str, Any]:
+        """
+        Build database from source files.
+        
+        Creates a fresh database from source files.
+        
+        Args:
+            source_folder: Path to source files folder
+            output_path: Optional path for new database (default: build in place)
+            
+        Returns:
+            Dictionary with build results:
+            - success: Boolean
+            - output_path: Path to built database
+            - log_path: Path to Build.log file
+            - message: Status message
+        """
+        try:
+            # If output_path specified, use BuildAs, otherwise use Build
+            if output_path:
+                self._call_addin_function("HandleRibbonCommand", "btnBuildAs", source_folder)
+            else:
+                self._call_addin_function("HandleRibbonCommand", "btnBuild", source_folder)
+            
+            log_path = os.path.join(source_folder, "Build.log")
+            
+            return {
+                "success": True,
+                "output_path": output_path,
+                "log_path": log_path if os.path.exists(log_path) else None,
+                "message": "Build from source completed successfully"
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "output_path": None,
+                "log_path": None,
+                "message": f"Build from source failed: {e}"
+            }
+    
+    def parse_log_file(self, log_path: str) -> dict[str, Any]:
+        """
+        Parse add-in log file for detailed results.
+        
+        Args:
+            log_path: Path to Export.log or Build.log
+            
+        Returns:
+            Dictionary with parsed log information
+        """
+        if not os.path.exists(log_path):
+            return {"found": False}
+        
+        try:
+            with open(log_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            return {
+                "found": True,
+                "content": content,
+                "path": log_path
+            }
+            
+        except Exception as e:
+            return {
+                "found": False,
+                "error": str(e)
+            }
+    
+    def get_version_info(self, app) -> dict[str, Any]:
+        """
+        Get comprehensive version information for VCS add-in and Access.
+        
+        Note: A database must be open in the Access application before calling this.
+        
+        Args:
+            app: Access Application COM object (with database open)
+            
+        Returns:
+            Dictionary with vcs_version, access_version, bitness, and paths
+        """
+        result = {
+            "success": True,
+            "addin_path": self.addin_path,
+        }
+        
+        # Store app reference temporarily for this call
+        self._app = app
+        
+        # Get Access application info
+        access_info = get_access_info(app)
+        result.update(access_info)
+        
+        # Get VCS add-in version
+        try:
+            vcs_version = self._call_addin_function("GetVCSVersion")
+            result["vcs_version"] = vcs_version
+        except Exception as e:
+            result["vcs_version"] = None
+            result["vcs_error"] = f"Failed to get VCS version: {e}"
+            result["success"] = False
+        
+        return result
