@@ -116,10 +116,22 @@ def load_config() -> dict[str, Any]:
     # Load .env files first (if not already loaded)
     _load_env_files()
     
+    # Parse callback enabled setting (default: true)
+    callback_enabled_str = os.getenv("ACCESS_VCS_CALLBACK_ENABLED", "true").lower()
+    callback_enabled = callback_enabled_str not in ("false", "0", "no", "off")
+    
     return {
+        # Database settings
         "ACCESS_VCS_DATABASE": os.getenv("ACCESS_VCS_DATABASE", ""),
         "ACCESS_VCS_ADDIN_PATH": os.getenv("ACCESS_VCS_ADDIN_PATH", get_default_addin_path()),
         "ACCESS_VCS_DISABLE_WRITES": os.getenv("ACCESS_VCS_DISABLE_WRITES", "false").lower() == "true",
+        
+        # Callback server settings
+        "ACCESS_VCS_CALLBACK_ENABLED": callback_enabled,
+        "ACCESS_VCS_CALLBACK_HOST": os.getenv("ACCESS_VCS_CALLBACK_HOST", "127.0.0.1"),
+        
+        # Runtime values (set by main.py after callback server starts)
+        # ACCESS_VCS_CALLBACK_URL - set in environment after server starts
     }
 
 
@@ -133,6 +145,16 @@ def get_config() -> dict[str, Any]:
     return load_config()
 
 
+def get_callback_url() -> str | None:
+    """
+    Get the callback URL if callback server is running.
+    
+    Returns:
+        Callback URL or None if not available
+    """
+    return os.environ.get("ACCESS_VCS_CALLBACK_URL")
+
+
 def validate_access_installation() -> None:
     """
     Verify that Microsoft Access COM automation is available.
@@ -143,6 +165,7 @@ def validate_access_installation() -> None:
     """
     try:
         import win32com.client
+        from win32com.client import gencache
     except ImportError:
         raise ImportError(
             "pywin32 is required for Access COM automation. "
@@ -152,12 +175,25 @@ def validate_access_installation() -> None:
     # Try to create Access application object
     try:
         # This will fail if Access is not installed
-        app = win32com.client.Dispatch("Access.Application")
-        # Clean up immediately
+        # Use EnsureDispatch for early binding (fixes Application.Run issues)
+        app = gencache.EnsureDispatch("Access.Application")
+        
+        # Check if this is the user's instance (has a database open)
+        # If so, do NOT quit - we'd close their work!
+        has_user_db = False
         try:
-            app.Quit()
+            current_db = app.CurrentDb()
+            if current_db is not None:
+                has_user_db = True
         except Exception:
             pass
+        
+        # Only quit if we created a new empty instance
+        if not has_user_db:
+            try:
+                app.Quit()
+            except Exception:
+                pass
     except Exception as e:
         raise RuntimeError(
             f"Microsoft Access COM automation not available. "

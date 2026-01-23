@@ -18,9 +18,11 @@ from source, and tracking changes.
 - Rebuild entire databases from source
 - Track changes between database and source
 - Read operations always available, write operations require permission
+- Long-running operations support progress reporting via callbacks
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .access_com.connection import AccessConnection
 from .access_com.dao_helpers import list_query_defs, list_table_defs
-from .config import get_config
+from .config import get_config, get_callback_url
 from .addin_integration import VCSAddinIntegration
 from .security import (
     validate_database_path,
@@ -37,6 +39,48 @@ from .security import (
     validate_source_directory,
     check_write_permission,
 )
+
+
+def _get_operation_manager():
+    """Get the operation manager instance if available."""
+    try:
+        from .operation_manager import OperationManager
+        return OperationManager.get_instance()
+    except Exception:
+        return None
+
+
+def _is_async_available() -> bool:
+    """Check if async callbacks are available."""
+    return get_callback_url() is not None
+
+
+def _check_database_busy(database_path: str) -> dict[str, Any] | None:
+    """
+    Check if a database has an operation in progress.
+    
+    Args:
+        database_path: Path to the database
+        
+    Returns:
+        Error dict if busy, None if available
+    """
+    op_manager = _get_operation_manager()
+    if not op_manager:
+        return None
+    
+    busy_status = op_manager.get_busy_status(database_path)
+    if busy_status:
+        return {
+            "success": False,
+            "error": busy_status["message"],
+            "busy": True,
+            "active_operation_id": busy_status["operation_id"],
+            "active_command": busy_status["command"],
+            "elapsed_seconds": busy_status["elapsed_seconds"],
+            "hint": "Wait for the current operation to complete, or cancel it with access_cancel_operation()"
+        }
+    return None
 
 
 # Create FastMCP server instance with proper metadata
@@ -60,7 +104,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def access_export_database(
+async def access_export_database(
     database_path: str,
     output_dir: str,
     object_types: list[str] | None = None
@@ -70,6 +114,9 @@ def access_export_database(
     
     Exports tables, queries, forms, reports, macros, and modules to 
     text-based files suitable for version control.
+    
+    This operation supports progress reporting - you'll receive updates
+    as objects are exported.
     
     Examples:
         # Export entire database
@@ -103,37 +150,97 @@ def access_export_database(
         
         # Get configuration
         config = get_config()
+        callback_url = get_callback_url()
+        op_manager = _get_operation_manager()
+        
+        # Check if database is already busy
+        busy_error = _check_database_busy(str(db_path))
+        if busy_error:
+            return busy_error
         
         # Determine if this is a VBA-only export
         vba_only = object_types and set(object_types) == {"modules"}
+        command = "ExportVBA" if vba_only else "Export"
         
-        # Connect to database and load add-in
+        # Connect to database
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
             # Initialize add-in integration
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin.load_addin(app)
+            addin._app = app  # Set app reference for add-in calls
             
-            # Perform export via add-in
-            if vba_only:
-                result = addin.export_vba(str(db_path), str(export_path))
+            # Check if async export is available
+            if callback_url and op_manager:
+                # Use async path with progress callbacks
+                operation_id, queue = op_manager.register_operation(
+                    database_path=str(db_path),
+                    command=command
+                )
+                callback_info = op_manager.create_callback_info(
+                    operation_id, callback_url, "cursor"
+                )
+                
+                try:
+                    # Call async API
+                    async_result = addin.call_async(callback_info, command, str(export_path))
+                    
+                    if async_result.get("sync"):
+                        # VBA returned sync result
+                        pass  # Fall through to count objects
+                    elif async_result.get("async"):
+                        # Wait for completion with progress reporting
+                        timeout_ms = async_result.get("timeout_ms", 300000)
+                        completion = await op_manager.wait_for_completion(
+                            operation_id,
+                            ctx=None,  # Context would be passed if available
+                            timeout_seconds=timeout_ms / 1000
+                        )
+                        
+                        if not completion.get("success"):
+                            return {
+                                "success": False,
+                                "error": completion.get("error", "Export failed"),
+                                "exported_count": 0,
+                                "export_path": str(export_path),
+                                "objects_by_type": {},
+                            }
+                except Exception as e:
+                    # Async call failed - fall back to sync
+                    op_manager.unregister_operation(operation_id)
+                    # Perform sync export
+                    if vba_only:
+                        result = addin.export_vba(str(db_path), str(export_path))
+                    else:
+                        result = addin.export_source(str(db_path), str(export_path))
+                    
+                    if not result["success"]:
+                        return {
+                            "success": False,
+                            "error": result["message"],
+                            "exported_count": 0,
+                            "export_path": str(export_path),
+                            "objects_by_type": {},
+                        }
             else:
-                result = addin.export_source(str(db_path), str(export_path))
-            
-            if not result["success"]:
-                return {
-                    "success": False,
-                    "error": result["message"],
-                    "exported_count": 0,
-                    "export_path": str(export_path),
-                    "objects_by_type": {},
-                }
+                # Use sync path (no callbacks available)
+                if vba_only:
+                    result = addin.export_vba(str(db_path), str(export_path))
+                else:
+                    result = addin.export_source(str(db_path), str(export_path))
+                
+                if not result["success"]:
+                    return {
+                        "success": False,
+                        "error": result["message"],
+                        "exported_count": 0,
+                        "export_path": str(export_path),
+                        "objects_by_type": {},
+                    }
             
             # Parse log file for detailed results
-            log_info = {}
-            if result.get("log_path"):
-                log_info = addin.parse_log_file(result["log_path"])
+            log_path = os.path.join(str(export_path), "Export.log")
+            log_info = addin.parse_log_file(log_path) if os.path.exists(log_path) else {}
             
             # Count exported objects by reading directory structure
             objects_by_type = {}
@@ -151,7 +258,7 @@ def access_export_database(
                 "exported_count": total_count,
                 "export_path": str(export_path),
                 "objects_by_type": objects_by_type,
-                "log_path": result.get("log_path"),
+                "log_path": log_path if os.path.exists(log_path) else None,
                 "log_content": log_info.get("content") if log_info.get("found") else None,
             }
     
@@ -325,7 +432,7 @@ def access_diff_database(
 
 
 @mcp.tool()
-def access_import_objects(
+async def access_import_objects(
     database_path: str,
     source_dir: str,
     object_types: list[str] | None = None,
@@ -336,6 +443,9 @@ def access_import_objects(
     
     Merges source files back into database. Can update existing objects
     or add new ones.
+    
+    This operation supports progress reporting - you'll receive updates
+    as objects are imported.
     
     Examples:
         # Import all objects
@@ -359,6 +469,8 @@ def access_import_objects(
         Dictionary with import results and any errors
     """
     config = get_config()
+    callback_url = get_callback_url()
+    op_manager = _get_operation_manager()
     
     try:
         # Check if writes are disabled
@@ -368,35 +480,79 @@ def access_import_objects(
         db_path = validate_database_path(database_path)
         src_path = validate_source_directory(source_dir)
         
-        # Connect to database and load add-in
+        # Check if database is already busy
+        busy_error = _check_database_busy(str(db_path))
+        if busy_error:
+            return busy_error
+        
+        # Connect to database
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
             # Initialize add-in integration
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin.load_addin(app)
+            addin._app = app  # Set app reference for add-in calls
             
-            # Perform merge build via add-in
-            result = addin.merge_build(str(db_path), str(src_path))
-            
-            if not result["success"]:
-                return {
-                    "success": False,
-                    "error": result["message"],
-                    "imported_count": 0,
-                }
+            # Check if async import is available
+            if callback_url and op_manager:
+                # Use async path with progress callbacks
+                operation_id, queue = op_manager.register_operation(
+                    database_path=str(db_path),
+                    command="MergeBuild"
+                )
+                callback_info = op_manager.create_callback_info(
+                    operation_id, callback_url, "cursor"
+                )
+                
+                try:
+                    # Call async API for MergeBuild
+                    async_result = addin.call_async(callback_info, "MergeBuild")
+                    
+                    if async_result.get("async"):
+                        # Wait for completion with progress reporting
+                        timeout_ms = async_result.get("timeout_ms", 300000)
+                        completion = await op_manager.wait_for_completion(
+                            operation_id,
+                            ctx=None,
+                            timeout_seconds=timeout_ms / 1000
+                        )
+                        
+                        if not completion.get("success"):
+                            return {
+                                "success": False,
+                                "error": completion.get("error", "Import failed"),
+                                "imported_count": 0,
+                            }
+                except Exception as e:
+                    # Async call failed - fall back to sync
+                    op_manager.unregister_operation(operation_id)
+                    result = addin.merge_build(str(db_path), str(src_path))
+                    if not result["success"]:
+                        return {
+                            "success": False,
+                            "error": result["message"],
+                            "imported_count": 0,
+                        }
+            else:
+                # Use sync path
+                result = addin.merge_build(str(db_path), str(src_path))
+                if not result["success"]:
+                    return {
+                        "success": False,
+                        "error": result["message"],
+                        "imported_count": 0,
+                    }
             
             # Parse log file for detailed results
-            log_info = {}
-            if result.get("log_path"):
-                log_info = addin.parse_log_file(result["log_path"])
+            log_path = os.path.join(str(src_path), "Build.log")
+            log_info = addin.parse_log_file(log_path) if os.path.exists(log_path) else {}
             
             return {
                 "success": True,
                 "imported_count": "See log for details",
                 "database_path": str(db_path),
                 "source_dir": str(src_path),
-                "log_path": result.get("log_path"),
+                "log_path": log_path if os.path.exists(log_path) else None,
                 "log_content": log_info.get("content") if log_info.get("found") else None,
             }
     
@@ -415,7 +571,7 @@ def access_import_objects(
 
 
 @mcp.tool()
-def access_rebuild_database(
+async def access_rebuild_database(
     source_dir: str,
     output_path: str,
     template_path: str | None = None
@@ -425,6 +581,9 @@ def access_rebuild_database(
     
     Creates a fresh database and imports all objects from source.
     Useful for clean builds and distribution.
+    
+    This operation supports progress reporting - you'll receive updates
+    as the database is built.
     
     Examples:
         # Rebuild from source
@@ -446,6 +605,8 @@ def access_rebuild_database(
         Dictionary with build results
     """
     config = get_config()
+    callback_url = get_callback_url()
+    op_manager = _get_operation_manager()
     
     try:
         # Check if writes are disabled
@@ -454,6 +615,12 @@ def access_rebuild_database(
         # Validate source directory
         src_path = validate_source_directory(source_dir)
         
+        # Check if target database is already busy (if it exists)
+        if output_path:
+            busy_error = _check_database_busy(output_path)
+            if busy_error:
+                return busy_error
+        
         # Note: We need Access to be running to call the add-in,
         # but we don't have a database open yet. The add-in's build
         # process will create the database.
@@ -461,36 +628,77 @@ def access_rebuild_database(
         # Create a temporary Access instance just to load the add-in
         with AccessConnection.__new__(AccessConnection) as conn:
             # Create Access app without opening a database
-            import win32com.client
-            app = win32com.client.Dispatch("Access.Application")
+            # Use EnsureDispatch for early binding (fixes Application.Run issues)
+            from win32com.client import gencache
+            app = gencache.EnsureDispatch("Access.Application")
             
             try:
                 # Initialize add-in integration
                 addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-                addin._app = app
-                addin._addin_loaded = False
-                addin.load_addin(app)
+                addin._app = app  # Set app reference for add-in calls
                 
-                # Perform build from source via add-in
-                result = addin.build_from_source(str(src_path), output_path)
+                # Determine command
+                command = "BuildAs" if output_path else "Build"
                 
-                if not result["success"]:
-                    return {
-                        "success": False,
-                        "error": result["message"],
-                        "output_path": None,
-                    }
+                # Check if async build is available
+                if callback_url and op_manager:
+                    # Use async path with progress callbacks
+                    operation_id, queue = op_manager.register_operation(
+                        database_path=output_path or str(src_path),
+                        command=command
+                    )
+                    callback_info = op_manager.create_callback_info(
+                        operation_id, callback_url, "cursor"
+                    )
+                    
+                    try:
+                        # Call async API for Build
+                        async_result = addin.call_async(callback_info, command, str(src_path))
+                        
+                        if async_result.get("async"):
+                            # Wait for completion with progress reporting
+                            timeout_ms = async_result.get("timeout_ms", 600000)  # 10 min for builds
+                            completion = await op_manager.wait_for_completion(
+                                operation_id,
+                                ctx=None,
+                                timeout_seconds=timeout_ms / 1000
+                            )
+                            
+                            if not completion.get("success"):
+                                return {
+                                    "success": False,
+                                    "error": completion.get("error", "Build failed"),
+                                    "output_path": None,
+                                }
+                    except Exception as e:
+                        # Async call failed - fall back to sync
+                        op_manager.unregister_operation(operation_id)
+                        result = addin.build_from_source(str(src_path), output_path)
+                        if not result["success"]:
+                            return {
+                                "success": False,
+                                "error": result["message"],
+                                "output_path": None,
+                            }
+                else:
+                    # Use sync path
+                    result = addin.build_from_source(str(src_path), output_path)
+                    if not result["success"]:
+                        return {
+                            "success": False,
+                            "error": result["message"],
+                            "output_path": None,
+                        }
                 
                 # Parse log file for detailed results
-                log_info = {}
-                if result.get("log_path"):
-                    log_info = addin.parse_log_file(result["log_path"])
+                log_path = os.path.join(str(src_path), "Build.log")
+                log_info = addin.parse_log_file(log_path) if os.path.exists(log_path) else {}
                 
                 return {
                     "success": True,
                     "output_path": output_path,
                     "source_dir": str(src_path),
-                    "log_path": result.get("log_path"),
+                    "log_path": log_path if os.path.exists(log_path) else None,
                     "log_content": log_info.get("content") if log_info.get("found") else None,
                 }
             finally:
@@ -547,3 +755,68 @@ def access_get_version_info() -> dict[str, Any]:
     from .validation import get_version_info_safe
     
     return get_version_info_safe()
+
+
+@mcp.tool()
+def access_cancel_operation(operation_id: str) -> dict[str, Any]:
+    """
+    Cancel a running async operation.
+    
+    Requests cancellation of a long-running operation (export, build, etc.).
+    The VBA add-in will detect the cancellation request during its next
+    DoEvents cycle and abort the operation.
+    
+    Note: Cancellation is cooperative - the operation will stop at the next
+    safe point, not immediately. The operation may take a few seconds to
+    respond depending on what it's doing.
+    
+    Examples:
+        # Cancel an export operation
+        access_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
+    
+    Args:
+        operation_id: The UUID of the operation to cancel
+    
+    Returns:
+        Dictionary with:
+        - success: Boolean indicating if cancellation was requested
+        - operation_id: The operation ID that was cancelled
+        - message: Status message
+    """
+    op_manager = _get_operation_manager()
+    
+    if not op_manager:
+        return {
+            "success": False,
+            "error": "Callback system not available",
+            "operation_id": operation_id,
+        }
+    
+    # Request cancellation
+    cancelled = op_manager.request_cancel(operation_id)
+    
+    if cancelled:
+        # Also try to notify VBA immediately via COM (best effort)
+        # This is non-blocking - VBA will also poll /cancel-status
+        try:
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            # Attempt COM call to Cancel API - may block if Access is busy
+            # Using a short timeout would be ideal but COM doesn't support that
+            # So we just do best-effort here
+            # addin.call_sync("Cancel", operation_id)  # Uncomment when VBA side is ready
+        except Exception:
+            # COM call failed - that's OK, VBA will poll
+            pass
+        
+        return {
+            "success": True,
+            "operation_id": operation_id,
+            "message": "Cancellation requested. Operation will stop at next safe point.",
+        }
+    else:
+        return {
+            "success": False,
+            "operation_id": operation_id,
+            "error": "Operation not found or already completed",
+        }

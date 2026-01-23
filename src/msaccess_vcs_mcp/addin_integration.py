@@ -107,7 +107,7 @@ class VCSAddinIntegration:
     
     def load_addin(self, app) -> bool:
         """
-        Verify add-in is accessible via Application.Run.
+        Verify add-in is accessible via the new API method.
         
         Note: The add-in doesn't need to be explicitly "loaded" - Access will
         load it automatically when we call Application.Run. However, the target
@@ -133,31 +133,34 @@ class VCSAddinIntegration:
             # Store app reference
             self._app = app
             
-            # Call a simple function to verify add-in is accessible
-            # Format: Path without extension + "." + Function name
-            # Example: "C:\Path\Version Control.Preload"
+            # Verify add-in is accessible using the new API method
+            # Format: app.Run("C:\Path\Version Control.API", "GetVCSVersion")
             addin_lib_name = os.path.splitext(self.addin_path)[0]
-            app.Run(f'{addin_lib_name}.Preload')
+            api_function_name = f'{addin_lib_name}.API'
+            
+            # Try calling a simple function to verify the add-in works
+            # This will also load the add-in if it's not already loaded
+            app.Run(api_function_name, "GetVCSVersion")
             
             self._addin_loaded = True
             return True
             
         except Exception as e:
             raise RuntimeError(
-                f"Failed to call VCS add-in function: {e}\n"
+                f"Failed to call VCS add-in API: {e}\n"
                 f"Ensure a database is open and the add-in is trusted by Access."
             )
     
     def _call_addin_function(self, function_name: str, *args) -> Any:
         """
-        Call a function in the VCS add-in.
+        Call a function in the VCS add-in using the new API method.
         
         Note: A database must be open in the Access application before calling
-        add-in functions. The add-in is loaded automatically by Access when called.
+        add-in functions. The add-in loads automatically when called.
         
         Args:
-            function_name: Name of function to call (e.g., "HandleRibbonCommand", "GetVCSVersion")
-            *args: Arguments to pass to function
+            function_name: Name of function to call (e.g., "GetVCSVersion", "HandleRibbonCommand")
+            *args: Arguments to pass to the function
             
         Returns:
             Result from add-in function
@@ -166,19 +169,80 @@ class VCSAddinIntegration:
             RuntimeError: If call fails
         """
         try:
-            # Format: Path without extension + "." + Function name
-            # Example: "C:\Path\Version Control.GetVCSVersion"
-            addin_lib_name = os.path.splitext(self.addin_path)[0]
-            full_function_name = f'{addin_lib_name}.{function_name}'
+            # New API format: Path without extension + ".API", then function name as first argument
+            # Example: app.Run("C:\Path\Version Control.API", "GetVCSVersion")
+            # Ensure path is absolute and normalized
+            addin_path_abs = os.path.abspath(self.addin_path)
+            addin_lib_name = os.path.splitext(addin_path_abs)[0]
+            api_function_name = f'{addin_lib_name}.API'
             
-            # Call the function with provided arguments
-            if args:
-                result = self._app.Run(full_function_name, *args)
-            else:
-                result = self._app.Run(full_function_name)
+            # Ensure app reference is set
+            if not self._app:
+                raise RuntimeError("Access Application object not set. Call get_version_info() or set _app first.")
             
-            return result
+            # Verify database is open (required for add-in to work)
+            try:
+                current_db = self._app.CurrentDb()
+                if not current_db:
+                    raise RuntimeError("No database is currently open in Access. The add-in requires a database to be open.")
+                # Force Access to recognize the current database by accessing a property
+                # This ensures the database context is fully established
+                _ = current_db.Name
+            except Exception as db_error:
+                raise RuntimeError(f"Cannot access current database: {db_error}. Ensure a database is open before calling add-in functions.")
             
+            # Call API with function name as first argument, then any additional args
+            # Note: The path format should match exactly what works in VBA
+            # Example: "C:\Users\akw\AppData\Roaming\MSAccessVCS\Version Control.API"
+            # Note: With early binding (gencache.EnsureDispatch), Run returns a tuple
+            # where the first element is the actual result
+            try:
+                if args:
+                    result = self._app.Run(api_function_name, function_name, *args)
+                else:
+                    result = self._app.Run(api_function_name, function_name)
+                # Handle tuple return from early-bound Run method
+                if isinstance(result, tuple) and len(result) > 0:
+                    return result[0]
+                return result
+            except Exception as run_error:
+                # First call may fail while loading/initializing the add-in
+                # Try calling a second time - the add-in should now be loaded
+                try:
+                    if args:
+                        result = self._app.Run(api_function_name, function_name, *args)
+                    else:
+                        result = self._app.Run(api_function_name, function_name)
+                    # Handle tuple return from early-bound Run method
+                    if isinstance(result, tuple) and len(result) > 0:
+                        return result[0]
+                    return result
+                except Exception as second_run_error:
+                    # Fallback: if Application.Run fails from COM, try a local wrapper via Eval.
+                    # This requires a public function in the current database, e.g.:
+                    #   Public Function CallVcsApi(methodName As String) As Variant
+                    #       CallVcsApi = Application.Run("C:\Path\Version Control.API", methodName)
+                    #   End Function
+                    wrapper_name = os.environ.get("ACCESS_VCS_API_WRAPPER", "CallVcsApi")
+                    try:
+                        eval_expr = f'{wrapper_name}("{function_name}")'
+                        return self._app.Eval(eval_expr)
+                    except Exception as eval_error:
+                        # All attempts failed - provide detailed error information
+                        error_details = (
+                            f"Failed to call add-in function '{function_name}': {run_error}\n"
+                            f"Second attempt also failed: {second_run_error}\n"
+                            f"Wrapper Eval failed: {eval_error}\n"
+                            f"Wrapper name: {wrapper_name}\n"
+                            f"API path used: {api_function_name}\n"
+                            f"Add-in path: {self.addin_path}\n"
+                            f"Ensure a database is open and the add-in path is correct."
+                        )
+                        raise RuntimeError(error_details)
+            
+        except RuntimeError:
+            # Re-raise RuntimeErrors as-is (they already have good error messages)
+            raise
         except Exception as e:
             raise RuntimeError(
                 f"Failed to call add-in function '{function_name}': {e}\n"
@@ -396,6 +460,87 @@ class VCSAddinIntegration:
                 "found": False,
                 "error": str(e)
             }
+    
+    # =========================================================================
+    # Sync/Async API Methods (for callback-enabled operations)
+    # =========================================================================
+    
+    def call_sync(self, command: str, *args) -> Any:
+        """
+        Call a VBA function synchronously using the API entry point.
+        
+        This calls the existing API function which returns results immediately.
+        Use for quick operations that don't need progress reporting.
+        
+        Args:
+            command: Command name (e.g., "GetVCSVersion", "GetOptions")
+            *args: Additional arguments to pass
+            
+        Returns:
+            Result from the VBA function
+            
+        Raises:
+            RuntimeError: If call fails
+        """
+        return self._call_addin_function(command, *args)
+    
+    def call_async(self, callback_info: str, command: str, *args) -> dict[str, Any]:
+        """
+        Call a VBA function asynchronously using the APIAsync entry point.
+        
+        This calls the new APIAsync function which:
+        - Spawns a detached process for long-running operations
+        - Returns immediately with async marker and timeout hint
+        - Sends progress updates via HTTP callbacks
+        - Sends completion or error when done
+        
+        Args:
+            callback_info: JSON string with callback_url and operation_id
+            command: Command name (e.g., "Export", "Build", "MergeBuild")
+            *args: Additional arguments to pass
+            
+        Returns:
+            Dict with either:
+            - {"sync": true, "result": ...} for quick operations
+            - {"async": true, "timeout_ms": ...} for async operations
+            
+        Raises:
+            RuntimeError: If call fails
+        """
+        import json
+        
+        try:
+            # Call APIAsync entry point
+            # Format: APIAsync(strCallbackInfo, strCommand, [args...])
+            addin_path_abs = os.path.abspath(self.addin_path)
+            addin_lib_name = os.path.splitext(addin_path_abs)[0]
+            api_async_name = f'{addin_lib_name}.APIAsync'
+            
+            # Ensure app reference is set
+            if not self._app:
+                raise RuntimeError("Access Application object not set.")
+            
+            # Call APIAsync with callback info as first arg
+            if args:
+                result = self._app.Run(api_async_name, callback_info, command, *args)
+            else:
+                result = self._app.Run(api_async_name, callback_info, command)
+            
+            # Handle tuple return from early-bound Run method
+            if isinstance(result, tuple) and len(result) > 0:
+                result = result[0]
+            
+            # Parse JSON response from VBA
+            if isinstance(result, str):
+                return json.loads(result)
+            else:
+                # Unexpected return type
+                return {"sync": True, "result": result}
+                
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid JSON response from APIAsync: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to call APIAsync '{command}': {e}")
     
     def get_version_info(self, app) -> dict[str, Any]:
         """

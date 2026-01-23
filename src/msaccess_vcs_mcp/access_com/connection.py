@@ -15,6 +15,7 @@ from typing import Any
 
 try:
     import win32com.client
+    from win32com.client import gencache
     COM_AVAILABLE = True
 except ImportError:
     COM_AVAILABLE = False
@@ -67,41 +68,18 @@ class AccessConnection:
         """
         if self._app is None:
             try:
-                # First, try to get the specific database file directly
+                # First, try to get the specific database file directly using GetObject
                 # This will work if the database is already open in any Access instance
+                # GetObject(path) finds the running instance with that database open
                 self._app = win32com.client.GetObject(self._db_path)
                 self._db_opened_via_getobject = True
                 self._owns_app = False  # User's Access instance - do NOT close it
             except Exception:
-                # Our database is not open. Check if Access is running with another db.
-                try:
-                    existing_app = win32com.client.GetObject(None, "Access.Application")
-                    # Access is running - check if it has a database open
-                    try:
-                        current_db = existing_app.CurrentDb()
-                        if current_db is not None:
-                            # Access has a DIFFERENT database open - do NOT use it!
-                            # Create our own Access instance to avoid interfering
-                            self._app = win32com.client.Dispatch("Access.Application")
-                            self._db_opened_via_getobject = False
-                            self._owns_app = True  # We created this
-                        else:
-                            # Access is running but no database open
-                            # Better to create our own to avoid confusion
-                            self._app = win32com.client.Dispatch("Access.Application")
-                            self._db_opened_via_getobject = False
-                            self._owns_app = True
-                    except Exception:
-                        # Can't check CurrentDb - Access might be in weird state
-                        # Create our own instance to be safe
-                        self._app = win32com.client.Dispatch("Access.Application")
-                        self._db_opened_via_getobject = False
-                        self._owns_app = True
-                except Exception:
-                    # No running Access instance, create new one
-                    self._app = win32com.client.Dispatch("Access.Application")
-                    self._db_opened_via_getobject = False
-                    self._owns_app = True  # We created this - we're responsible for cleanup
+                # Database not open in any Access instance - create our own instance
+                # Use EnsureDispatch for early binding which fixes Application.Run
+                self._app = gencache.EnsureDispatch("Access.Application")
+                self._db_opened_via_getobject = False
+                self._owns_app = True  # We created this - we're responsible for cleanup
         return self._app
     
     def _get_current_db(self):

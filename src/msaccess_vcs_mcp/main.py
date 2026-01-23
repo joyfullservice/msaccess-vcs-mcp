@@ -1,9 +1,78 @@
 """Main entry point for msaccess-vcs-mcp MCP server."""
 
+import asyncio
+import atexit
 import os
 import sys
 
 from .config import get_config, validate_access_installation
+
+
+# Global reference to callback server for cleanup
+_callback_server = None
+
+
+def _start_callback_server(config: dict) -> str | None:
+    """
+    Start the HTTP callback server for VBA progress updates.
+    
+    Args:
+        config: Configuration dictionary
+        
+    Returns:
+        The callback URL, or None if disabled
+    """
+    global _callback_server
+    
+    # Check if callbacks are enabled
+    if config.get("ACCESS_VCS_CALLBACK_ENABLED") is False:
+        print("Callback server: disabled", file=sys.stderr)
+        return None
+    
+    try:
+        from .callback_server import CallbackServer
+        from .operation_manager import OperationManager
+        
+        # Get operation manager (creates singleton)
+        op_manager = OperationManager.get_instance()
+        
+        # Set the event loop for cross-thread queue operations
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop yet - it will be set when MCP starts
+            loop = asyncio.new_event_loop()
+        op_manager.set_event_loop(loop)
+        
+        # Create and start callback server
+        host = config.get("ACCESS_VCS_CALLBACK_HOST", "127.0.0.1")
+        _callback_server = CallbackServer(
+            callback_router=op_manager.route_callback,
+            cancel_checker=op_manager.is_cancelled,
+            cancel_requester=op_manager.request_cancel,
+            host=host,
+            port=0  # OS assigns available port
+        )
+        _callback_server.start()
+        
+        # Register cleanup on exit
+        atexit.register(_stop_callback_server)
+        
+        callback_url = _callback_server.callback_url
+        print(f"✓ Callback server: {callback_url}", file=sys.stderr)
+        return callback_url
+        
+    except Exception as e:
+        print(f"⚠ Callback server failed to start: {e}", file=sys.stderr)
+        return None
+
+
+def _stop_callback_server() -> None:
+    """Stop the callback server on exit."""
+    global _callback_server
+    if _callback_server:
+        _callback_server.stop()
+        _callback_server = None
 
 
 def main() -> None:
@@ -64,6 +133,13 @@ def main() -> None:
             print("\n✗ Component validation failed (server will still start)", file=sys.stderr)
         
         print("--- End validation ---\n", file=sys.stderr)
+    
+    # Start callback server for VBA progress updates
+    callback_url = _start_callback_server(config)
+    
+    # Store callback URL in environment for tools to access
+    if callback_url:
+        os.environ["ACCESS_VCS_CALLBACK_URL"] = callback_url
     
     # Import and run MCP server
     from .tools import mcp
