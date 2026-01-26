@@ -820,3 +820,117 @@ def access_cancel_operation(operation_id: str) -> dict[str, Any]:
             "operation_id": operation_id,
             "error": "Operation not found or already completed",
         }
+
+
+@mcp.tool()
+def access_check_vba_compiled(database_path: str) -> dict[str, Any]:
+    """
+    Check if VBA code in an Access database is compiled.
+    
+    Returns the compilation state without attempting to compile.
+    Useful for establishing a baseline before making code changes.
+    
+    Examples:
+        # Check compilation state
+        result = access_check_vba_compiled("C:\\\\db.accdb")
+        if result["compiled"]:
+            print("Code is compiled")
+        else:
+            print("Code is not compiled (may need compilation)")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+    
+    Returns:
+        Dictionary with:
+        - success: Boolean indicating if the check completed successfully
+        - compiled: Boolean - True if project is compiled, False otherwise
+        - error: Error message if check failed
+    """
+    try:
+        # Validate path
+        db_path = validate_database_path(database_path)
+        
+        # Connect to database
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            # Initialize add-in integration
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app  # Set app reference for add-in calls
+            
+            # Call IsVBACompiled API
+            is_compiled = addin.call_sync("IsVBACompiled")
+            
+            return {
+                "success": True,
+                "compiled": bool(is_compiled),
+            }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "compiled": False,
+            "error": str(e),
+        }
+
+
+@mcp.tool()
+def access_compile_vba(
+    database_path: str,
+    suppress_warnings: bool = False
+) -> dict[str, Any]:
+    """
+    Compile all VBA modules in an Access database and return success status.
+    
+    Attempts to compile all VBA code in the database. Returns True if compilation
+    succeeded (project is compiled), False if compilation failed.
+    
+    **Important:** If compilation fails, do not proceed with code edits as there
+    are existing compilation errors that must be fixed first.
+    
+    Examples:
+        # Compile VBA code
+        result = access_compile_vba("C:\\\\db.accdb", suppress_warnings=True)
+        if result["success"]:
+            print("Compilation successful!")
+        else:
+            print("Compilation failed - do not proceed with edits")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        suppress_warnings: If True, suppress message boxes during compilation.
+                         Warning: If code crashes, warnings may remain disabled.
+    
+    Returns:
+        Dictionary with:
+        - success: Boolean - True if compilation succeeded (project is compiled),
+                  False if compilation failed
+        - error: Error message if compilation check failed
+    """
+    try:
+        # Validate path
+        db_path = validate_database_path(database_path)
+        
+        # Connect to database
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            # Initialize add-in integration
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app  # Set app reference for add-in calls
+            
+            # Call CompileVBA API with suppress_warnings parameter
+            compile_result = addin.call_sync("CompileVBA", suppress_warnings)
+            
+            return {
+                "success": bool(compile_result),
+            }
+    
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+        }
