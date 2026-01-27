@@ -323,6 +323,9 @@ class OperationManager:
         
         timeout = timeout_seconds or operation.timeout_seconds
         
+        # Collect log messages to include in result
+        log_messages: list[str] = []
+        
         try:
             async with asyncio.timeout(timeout):
                 while True:
@@ -347,15 +350,20 @@ class OperationManager:
                         logger.debug(f"Progress: {progress}/{total} - {message}")
                         
                     elif msg_type == "log":
-                        # Log message from VBA
-                        level = callback.get("level", "info")
-                        if ctx and hasattr(ctx, level):
-                            try:
-                                log_method = getattr(ctx, level)
-                                await log_method(message)
-                            except Exception:
-                                pass
-                        logger.info(f"VBA log [{level}]: {message}")
+                        # Log message from VBA - report progress and collect for result
+                        if message:
+                            log_messages.append(message)
+                            # Report to MCP context for real-time display
+                            if ctx and hasattr(ctx, "report_progress"):
+                                try:
+                                    await ctx.report_progress(
+                                        progress=len(log_messages),
+                                        total=0,  # Unknown total
+                                        message=message
+                                    )
+                                except Exception:
+                                    pass
+                        logger.info(f"VBA log: {message}")
                         
                     elif msg_type == "complete":
                         # Operation completed successfully
@@ -363,7 +371,9 @@ class OperationManager:
                         return {
                             "success": True,
                             "message": message,
-                            "result": callback.get("result")
+                            "result": callback.get("result"),
+                            "log_path": callback.get("log_path"),
+                            "log_messages": log_messages if log_messages else None
                         }
                         
                     elif msg_type == "error":
@@ -372,7 +382,8 @@ class OperationManager:
                         return {
                             "success": False,
                             "error": message,
-                            "code": callback.get("code")
+                            "code": callback.get("code"),
+                            "log_path": callback.get("log_path")
                         }
                     
                     elif msg_type == "cancelled":

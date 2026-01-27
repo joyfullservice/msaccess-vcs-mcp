@@ -276,6 +276,10 @@ class VCSAddinIntegration:
         """
         Export database to source files using VCS add-in.
         
+        Note: This is the synchronous fallback. The preferred approach is to use
+        call_async() with the "Export" command, which spawns via timer and allows
+        the UI to show while posting progress callbacks.
+        
         Args:
             db_path: Path to Access database
             source_folder: Optional custom export folder (default: db_name.src)
@@ -291,8 +295,8 @@ class VCSAddinIntegration:
         export_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            # The add-in uses HandleRibbonCommand with button IDs
-            # btnExport triggers the main export function
+            # Use HandleRibbonCommand to trigger the same flow as ribbon button
+            # This shows the full UI with progress dialogs
             self._call_addin_function("HandleRibbonCommand", "btnExport")
             
             # Check for log file to confirm export completed
@@ -317,6 +321,9 @@ class VCSAddinIntegration:
         """
         Export only VBA components (modules, class modules).
         
+        Note: This is the synchronous fallback. The preferred approach is to use
+        call_async() with the "ExportVBA" command.
+        
         Args:
             db_path: Path to Access database
             source_folder: Optional custom export folder
@@ -327,6 +334,7 @@ class VCSAddinIntegration:
         export_path = self._get_export_folder(db_path, source_folder)
         
         try:
+            # Use HandleRibbonCommand to trigger the same flow as ribbon button
             self._call_addin_function("HandleRibbonCommand", "btnExportVBA")
             
             log_path = os.path.join(export_path, "Export.log")
@@ -352,6 +360,9 @@ class VCSAddinIntegration:
         
         This updates modified objects without rebuilding the entire database.
         
+        Note: This is the synchronous fallback. The preferred approach is to use
+        call_async() with the "MergeBuild" command.
+        
         Args:
             db_path: Path to Access database
             source_folder: Optional custom source folder
@@ -366,8 +377,7 @@ class VCSAddinIntegration:
         source_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            # MergeBuild is exposed via VCS() API
-            # We need to call it via HandleRibbonCommand
+            # Use HandleRibbonCommand to trigger the same flow as ribbon button
             self._call_addin_function("HandleRibbonCommand", "btnMergeBuild")
             
             log_path = os.path.join(source_path, "Build.log")

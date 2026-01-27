@@ -21,13 +21,14 @@ from source, and tracking changes.
 - Long-running operations support progress reporting via callbacks
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 
 from .access_com.connection import AccessConnection
 from .access_com.dao_helpers import list_query_defs, list_table_defs
@@ -107,7 +108,9 @@ mcp = FastMCP(
 async def access_export_database(
     database_path: str,
     output_dir: str,
-    object_types: list[str] | None = None
+    object_types: list[str] | None = None,
+    full_export: bool = False,
+    ctx: Context = None
 ) -> dict[str, Any]:
     """
     Export Access database objects to source files.
@@ -119,8 +122,11 @@ async def access_export_database(
     as objects are exported.
     
     Examples:
-        # Export entire database
+        # Export entire database (quick/fast save - only changed objects)
         access_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
+        
+        # Full export (all objects, regardless of changes)
+        access_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb", full_export=True)
         
         # Export only queries and modules
         access_export_database(
@@ -135,6 +141,7 @@ async def access_export_database(
         object_types: Optional list of types to export: 
             ["tables", "queries", "forms", "reports", "modules", "macros"]
             If None, exports all types
+        full_export: If True, export all objects; if False (default), only export changed objects
     
     Returns:
         Dictionary with:
@@ -158,9 +165,14 @@ async def access_export_database(
         if busy_error:
             return busy_error
         
-        # Determine if this is a VBA-only export
+        # Determine export command
         vba_only = object_types and set(object_types) == {"modules"}
-        command = "ExportVBA" if vba_only else "Export"
+        if vba_only:
+            command = "ExportVBA"
+        elif full_export:
+            command = "FullExport"
+        else:
+            command = "Export"
         
         # Connect to database
         with AccessConnection(str(db_path)) as conn:
@@ -170,8 +182,23 @@ async def access_export_database(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin._app = app  # Set app reference for add-in calls
             
+            # Pre-flight check: verify add-in is responsive (not blocked by dialogs)
+            try:
+                addin.call_sync("GetVCSVersion")
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Add-in not responsive (may have a dialog open): {e}",
+                    "exported_count": 0,
+                    "export_path": str(export_path),
+                    "objects_by_type": {},
+                    "hint": "Check if Access has any open dialogs or message boxes"
+                }
+            
             # Check if async export is available
             if callback_url and op_manager:
+                # Ensure operation manager uses the correct event loop (FastMCP's loop)
+                op_manager.set_event_loop(asyncio.get_running_loop())
                 # Use async path with progress callbacks
                 operation_id, queue = op_manager.register_operation(
                     database_path=str(db_path),
@@ -182,9 +209,10 @@ async def access_export_database(
                 )
                 
                 try:
-                    # Call async API
-                    async_result = addin.call_async(callback_info, command, str(export_path))
+                    # Call async API (Export/ExportVBA don't take arguments - they use VCS options)
+                    async_result = addin.call_async(callback_info, command)
                     
+                    completion = None
                     if async_result.get("sync"):
                         # VBA returned sync result
                         pass  # Fall through to count objects
@@ -193,7 +221,7 @@ async def access_export_database(
                         timeout_ms = async_result.get("timeout_ms", 300000)
                         completion = await op_manager.wait_for_completion(
                             operation_id,
-                            ctx=None,  # Context would be passed if available
+                            ctx=ctx,  # Pass context for progress reporting
                             timeout_seconds=timeout_ms / 1000
                         )
                         
@@ -207,6 +235,7 @@ async def access_export_database(
                             }
                 except Exception as e:
                     # Async call failed - fall back to sync
+                    completion = None
                     op_manager.unregister_operation(operation_id)
                     # Perform sync export
                     if vba_only:
@@ -224,6 +253,7 @@ async def access_export_database(
                         }
             else:
                 # Use sync path (no callbacks available)
+                completion = None
                 if vba_only:
                     result = addin.export_vba(str(db_path), str(export_path))
                 else:
@@ -238,28 +268,24 @@ async def access_export_database(
                         "objects_by_type": {},
                     }
             
-            # Parse log file for detailed results
-            log_path = os.path.join(str(export_path), "Export.log")
-            log_info = addin.parse_log_file(log_path) if os.path.exists(log_path) else {}
+            # Get log path and messages from callback result
+            log_path = None
+            log_messages = None
+            if completion:
+                log_path = completion.get("log_path")
+                log_messages = completion.get("log_messages")
             
-            # Count exported objects by reading directory structure
-            objects_by_type = {}
-            for obj_type in ["queries", "modules", "forms", "reports", "macros", "tables"]:
-                type_dir = export_path / obj_type
-                if type_dir.exists():
-                    # Count files in directory
-                    files = list(type_dir.glob("*"))
-                    objects_by_type[obj_type] = len([f for f in files if f.is_file()])
-            
-            total_count = sum(objects_by_type.values())
+            if not log_path:
+                # Fallback to legacy location
+                legacy_path = os.path.join(str(export_path), "Export.log")
+                if os.path.exists(legacy_path):
+                    log_path = legacy_path
             
             return {
                 "success": True,
-                "exported_count": total_count,
                 "export_path": str(export_path),
-                "objects_by_type": objects_by_type,
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "log_content": log_info.get("content") if log_info.get("found") else None,
+                "log_path": log_path if (log_path and os.path.exists(log_path)) else None,
+                "messages": log_messages,
             }
     
     except Exception as e:
@@ -493,8 +519,22 @@ async def access_import_objects(
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin._app = app  # Set app reference for add-in calls
             
+            # Pre-flight check: verify add-in is responsive (not blocked by dialogs)
+            try:
+                addin.call_sync("GetVCSVersion")
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Add-in not responsive (may have a dialog open): {e}",
+                    "imported_count": 0,
+                    "hint": "Check if Access has any open dialogs or message boxes"
+                }
+            
             # Check if async import is available
             if callback_url and op_manager:
+                # Ensure operation manager uses the correct event loop (FastMCP's loop)
+                op_manager.set_event_loop(asyncio.get_running_loop())
+                
                 # Use async path with progress callbacks
                 operation_id, queue = op_manager.register_operation(
                     database_path=str(db_path),
@@ -506,6 +546,7 @@ async def access_import_objects(
                 
                 try:
                     # Call async API for MergeBuild
+                    completion = None
                     async_result = addin.call_async(callback_info, "MergeBuild")
                     
                     if async_result.get("async"):
@@ -525,6 +566,7 @@ async def access_import_objects(
                             }
                 except Exception as e:
                     # Async call failed - fall back to sync
+                    completion = None
                     op_manager.unregister_operation(operation_id)
                     result = addin.merge_build(str(db_path), str(src_path))
                     if not result["success"]:
@@ -535,6 +577,7 @@ async def access_import_objects(
                         }
             else:
                 # Use sync path
+                completion = None
                 result = addin.merge_build(str(db_path), str(src_path))
                 if not result["success"]:
                     return {
@@ -543,17 +586,21 @@ async def access_import_objects(
                         "imported_count": 0,
                     }
             
-            # Parse log file for detailed results
-            log_path = os.path.join(str(src_path), "Build.log")
-            log_info = addin.parse_log_file(log_path) if os.path.exists(log_path) else {}
+            # Get log path from callback result, or use legacy path as fallback
+            log_path = None
+            if completion:
+                log_path = completion.get("log_path")
+            if not log_path:
+                legacy_path = os.path.join(str(src_path), "Build.log")
+                if os.path.exists(legacy_path):
+                    log_path = legacy_path
             
             return {
                 "success": True,
                 "imported_count": "See log for details",
                 "database_path": str(db_path),
                 "source_dir": str(src_path),
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "log_content": log_info.get("content") if log_info.get("found") else None,
+                "log_path": log_path if (log_path and os.path.exists(log_path)) else None,
             }
     
     except PermissionError as e:
@@ -642,6 +689,9 @@ async def access_rebuild_database(
                 
                 # Check if async build is available
                 if callback_url and op_manager:
+                    # Ensure operation manager uses the correct event loop (FastMCP's loop)
+                    op_manager.set_event_loop(asyncio.get_running_loop())
+                    
                     # Use async path with progress callbacks
                     operation_id, queue = op_manager.register_operation(
                         database_path=output_path or str(src_path),
@@ -653,7 +703,12 @@ async def access_rebuild_database(
                     
                     try:
                         # Call async API for Build
-                        async_result = addin.call_async(callback_info, command, str(src_path))
+                        # Build takes optional source folder, BuildAs does not
+                        completion = None
+                        if command == "Build":
+                            async_result = addin.call_async(callback_info, command, str(src_path))
+                        else:
+                            async_result = addin.call_async(callback_info, command)
                         
                         if async_result.get("async"):
                             # Wait for completion with progress reporting
@@ -672,6 +727,7 @@ async def access_rebuild_database(
                                 }
                     except Exception as e:
                         # Async call failed - fall back to sync
+                        completion = None
                         op_manager.unregister_operation(operation_id)
                         result = addin.build_from_source(str(src_path), output_path)
                         if not result["success"]:
@@ -682,6 +738,7 @@ async def access_rebuild_database(
                             }
                 else:
                     # Use sync path
+                    completion = None
                     result = addin.build_from_source(str(src_path), output_path)
                     if not result["success"]:
                         return {
@@ -690,16 +747,20 @@ async def access_rebuild_database(
                             "output_path": None,
                         }
                 
-                # Parse log file for detailed results
-                log_path = os.path.join(str(src_path), "Build.log")
-                log_info = addin.parse_log_file(log_path) if os.path.exists(log_path) else {}
+                # Get log path from callback result, or use legacy path as fallback
+                log_path = None
+                if completion:
+                    log_path = completion.get("log_path")
+                if not log_path:
+                    legacy_path = os.path.join(str(src_path), "Build.log")
+                    if os.path.exists(legacy_path):
+                        log_path = legacy_path
                 
                 return {
                     "success": True,
                     "output_path": output_path,
                     "source_dir": str(src_path),
-                    "log_path": log_path if os.path.exists(log_path) else None,
-                    "log_content": log_info.get("content") if log_info.get("found") else None,
+                    "log_path": log_path if (log_path and os.path.exists(log_path)) else None,
                 }
             finally:
                 # Clean up Access instance
@@ -735,6 +796,7 @@ def access_get_version_info() -> dict[str, Any]:
     - Access bitness (32-bit or 64-bit)
     - Configured target database path
     - Add-in file path
+    - Callback server status (for async operations)
     
     Examples:
         # Get version information
@@ -749,12 +811,28 @@ def access_get_version_info() -> dict[str, Any]:
         - bitness: "32-bit" or "64-bit"
         - target_database: Configured database path from ACCESS_VCS_DATABASE
         - addin_path: Path to the VCS add-in file
+        - callback_url: URL for async callbacks (None if not available)
+        - async_available: Boolean indicating if async operations are supported
         - errors: List of validation errors
         - warnings: List of validation warnings
     """
     from .validation import get_version_info_safe
     
-    return get_version_info_safe()
+    result = get_version_info_safe()
+    
+    # Add callback server status
+    callback_url = get_callback_url()
+    op_manager = _get_operation_manager()
+    
+    result["callback_url"] = callback_url
+    result["async_available"] = bool(callback_url and op_manager)
+    
+    if not callback_url:
+        result["warnings"] = result.get("warnings", []) + [
+            "Callback server not running - async operations will fall back to sync mode"
+        ]
+    
+    return result
 
 
 @mcp.tool()
