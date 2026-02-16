@@ -323,6 +323,14 @@ class OperationManager:
         
         timeout = timeout_seconds or operation.timeout_seconds
         
+        # Log context availability for debugging
+        if ctx is None:
+            logger.info(f"Operation {operation_id}: No context provided - progress reporting disabled")
+        elif hasattr(ctx, "report_progress"):
+            logger.info(f"Operation {operation_id}: Context available with report_progress method")
+        else:
+            logger.warning(f"Operation {operation_id}: Context provided but missing report_progress method")
+        
         # Collect log messages to include in result
         log_messages: list[str] = []
         
@@ -345,9 +353,12 @@ class OperationManager:
                                     total=total,
                                     message=message
                                 )
+                                logger.debug(f"Progress reported: {progress}/{total} - {message}")
                             except Exception as e:
-                                logger.debug(f"Could not report progress: {e}")
-                        logger.debug(f"Progress: {progress}/{total} - {message}")
+                                logger.warning(f"Failed to report progress: {e}", exc_info=True)
+                        else:
+                            logger.debug(f"Progress not reported (ctx={ctx is not None}, has_method={ctx and hasattr(ctx, 'report_progress')}): {progress}/{total} - {message}")
+                        logger.debug(f"Progress callback: {progress}/{total} - {message}")
                         
                     elif msg_type == "log":
                         # Log message from VBA - report progress and collect for result
@@ -361,8 +372,11 @@ class OperationManager:
                                         total=0,  # Unknown total
                                         message=message
                                     )
-                                except Exception:
-                                    pass
+                                    logger.debug(f"Log message reported to context: {message[:50]}...")
+                                except Exception as e:
+                                    logger.warning(f"Failed to report log message to context: {e}", exc_info=True)
+                            else:
+                                logger.debug(f"Log message not reported (ctx={ctx is not None}, has_method={ctx and hasattr(ctx, 'report_progress')}): {message[:50]}...")
                         logger.info(f"VBA log: {message}")
                         
                     elif msg_type == "complete":

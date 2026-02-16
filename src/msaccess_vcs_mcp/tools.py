@@ -23,12 +23,15 @@ from source, and tracking changes.
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Context
+
+logger = logging.getLogger(__name__)
 
 from .access_com.connection import AccessConnection
 from .access_com.dao_helpers import list_query_defs, list_table_defs
@@ -150,6 +153,9 @@ async def access_export_database(
         - objects_by_type: Breakdown of what was exported
         - errors: List of any errors encountered
     """
+    logger.info(f"access_export_database called with ctx={ctx is not None}, ctx_type={type(ctx).__name__ if ctx else 'None'}")
+    if ctx:
+        logger.info(f"Context attributes: {[attr for attr in dir(ctx) if not attr.startswith('_')]}")
     try:
         # Validate paths
         db_path = validate_database_path(database_path)
@@ -219,6 +225,9 @@ async def access_export_database(
                     elif async_result.get("async"):
                         # Wait for completion with progress reporting
                         timeout_ms = async_result.get("timeout_ms", 300000)
+                        logger.info(f"Starting async operation {operation_id} with ctx={ctx is not None}, ctx_type={type(ctx).__name__ if ctx else 'None'}")
+                        if ctx:
+                            logger.info(f"Context has report_progress: {hasattr(ctx, 'report_progress')}")
                         completion = await op_manager.wait_for_completion(
                             operation_id,
                             ctx=ctx,  # Pass context for progress reporting
