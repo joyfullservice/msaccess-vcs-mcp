@@ -3,7 +3,7 @@ Validation utilities for checking component availability and version information
 
 This module provides shared validation logic used for:
 - Startup validation checks
-- Troubleshooting via access_get_version_info() tool
+- Troubleshooting via vcs_get_version_info() tool
 - Pre-operation validation in other tools
 """
 

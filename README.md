@@ -248,7 +248,7 @@ ACCESS_VCS_DATABASE=C:\Users\YourName\dev\testdb.accdb
 
 ## Available Tools
 
-### `access_export_database(database_path, output_dir, object_types)`
+### `vcs_export_database(database_path, output_dir, object_types)`
 
 Export Access database objects to source files via the VCS add-in.
 
@@ -269,17 +269,17 @@ Supports all Access object types: tables, queries, forms, reports, modules, macr
 **Example:**
 ```python
 # Export entire database
-access_export_database("C:\\db.accdb", "C:\\src\\mydb")
+vcs_export_database("C:\\db.accdb", "C:\\src\\mydb")
 
 # Export only VBA modules
-access_export_database(
+vcs_export_database(
     "C:\\db.accdb", 
     "C:\\src\\mydb",
     object_types=["modules"]
 )
 ```
 
-### `access_list_objects(database_path)`
+### `vcs_list_objects(database_path)`
 
 List all objects in an Access database.
 
@@ -295,10 +295,10 @@ List all objects in an Access database.
 
 **Example:**
 ```python
-access_list_objects("C:\\db.accdb")
+vcs_list_objects("C:\\db.accdb")
 ```
 
-### `access_diff_database(database_path, source_dir, show_details)`
+### `vcs_diff_database(database_path, source_dir, show_details)`
 
 Compare database objects against source files.
 
@@ -315,10 +315,10 @@ Compare database objects against source files.
 
 **Example:**
 ```python
-access_diff_database("C:\\db.accdb", "C:\\src\\mydb")
+vcs_diff_database("C:\\db.accdb", "C:\\src\\mydb")
 ```
 
-### `access_import_objects(database_path, source_dir, object_types, overwrite)`
+### `vcs_import_objects(database_path, source_dir, object_types, overwrite)`
 
 Import objects from source files into Access database using merge build.
 
@@ -326,7 +326,7 @@ Merges source file changes into the existing database without requiring a full r
 
 **Note:** Database writes are enabled by default. Set `ACCESS_VCS_DISABLE_WRITES=true` to prevent modifications.
 
-### `access_rebuild_database(source_dir, output_path, template_path)`
+### `vcs_rebuild_database(source_dir, output_path, template_path)`
 
 Build a complete Access database from source files.
 
@@ -380,7 +380,7 @@ All files use **UTF-8 with BOM** encoding, which is critical for proper import b
 
 ```bash
 # 1. Export database to source
-access_export_database("C:\\db.accdb", "C:\\src\\db")
+vcs_export_database("C:\\db.accdb", "C:\\src\\db")
 
 # 2. Initialize git (if not already done)
 cd C:\src\db
@@ -391,10 +391,10 @@ git commit -m "Initial export of database"
 # 3. Make changes in Access...
 
 # 4. See what changed
-access_diff_database("C:\\db.accdb", "C:\\src\\db")
+vcs_diff_database("C:\\db.accdb", "C:\\src\\db")
 
 # 5. Export changes
-access_export_database("C:\\db.accdb", "C:\\src\\db")
+vcs_export_database("C:\\db.accdb", "C:\\src\\db")
 
 # 6. Commit changes
 git add .
@@ -411,7 +411,7 @@ db_list_tables(database="legacy")
 db_list_views(database="legacy")
 
 # 2. Export to version control (msaccess-vcs-mcp)
-access_export_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
+vcs_export_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
 
 # 3. Make changes to source files...
 
@@ -424,7 +424,7 @@ db_compare_queries(
 )
 
 # 5. Check what changed (msaccess-vcs-mcp)
-access_diff_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
+vcs_diff_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
 ```
 
 ## Development

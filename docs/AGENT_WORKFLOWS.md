@@ -41,7 +41,7 @@ All Access development workflows follow this pattern:
 **Steps:**
 ```python
 # 1. Export the database to source files
-access_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 2. Read the query source file
 query_sql = read_file("C:\\mydb.src\\queries\\CustomerReport.sql")
@@ -53,7 +53,7 @@ query_sql = read_file("C:\\mydb.src\\queries\\CustomerReport.sql")
 write_file("C:\\mydb.src\\queries\\CustomerReport.sql", updated_sql)
 
 # 5. Merge changes back into database
-access_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 6. Test the query
 # (Open database and run query to verify)
@@ -71,7 +71,7 @@ access_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 **Steps:**
 ```python
 # 1. Export VBA modules only (faster)
-access_export_database(
+vcs_export_database(
     "C:\\mydb.accdb", 
     "C:\\mydb.src",
     object_types=["modules"]
@@ -87,7 +87,7 @@ module_code = read_file("C:\\mydb.src\\modules\\Utilities.bas")
 write_file("C:\\mydb.src\\modules\\Utilities.bas", updated_code)
 
 # 5. Merge changes back
-access_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 6. Test the functions
 # (Open VBE and test the new/updated functions)
@@ -106,7 +106,7 @@ access_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 **Steps:**
 ```python
 # 1. Export existing database
-access_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 2. Create new source file
 # For a new query:
@@ -123,10 +123,10 @@ ORDER BY CompanyName
 write_file("C:\\mydb.src\\queries\\NewCustomerList.sql", new_query)
 
 # 3. Merge into database
-access_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 4. Verify the object was created
-objects = access_list_objects("C:\\mydb.accdb")
+objects = vcs_list_objects("C:\\mydb.accdb")
 print(objects["queries"])
 ```
 
@@ -143,7 +143,7 @@ print(objects["queries"])
 **Steps:**
 ```python
 # 1. Full export to source files
-result = access_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+result = vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 2. Review what was exported
 print(f"Exported {result['exported_count']} objects")
@@ -168,7 +168,7 @@ git_commit("Initial database export")
 **Steps:**
 ```python
 # 1. Commit any local changes first
-access_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
 git_add("C:\\mydb.src")
 git_commit("My changes before pull")
 
@@ -176,18 +176,18 @@ git_commit("My changes before pull")
 git_pull()
 
 # 3. Review what changed
-diff_result = access_diff_database("C:\\mydb.accdb", "C:\\mydb.src")
+diff_result = vcs_diff_database("C:\\mydb.accdb", "C:\\mydb.src")
 print("Modified objects:")
 print(diff_result)
 
 # 4. Merge source changes into database
-access_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_import_objects("C:\\mydb.accdb", "C:\\mydb.src")
 
 # 5. Test the merged result
 # (Verify database functions correctly)
 
 # 6. Export and commit if merge succeeded
-access_export_database("C:\\mydb.accdb", "C:\\mydb.src")
+vcs_export_database("C:\\mydb.accdb", "C:\\mydb.src")
 git_add("C:\\mydb.src")
 git_commit("Merged changes from team")
 ```
@@ -205,7 +205,7 @@ git_commit("Merged changes from team")
 **Steps:**
 ```python
 # 1. Build from source files
-result = access_rebuild_database(
+result = vcs_rebuild_database(
     "C:\\mydb.src",
     "C:\\builds\\mydb_v1.0.accdb"
 )
@@ -218,7 +218,7 @@ else:
     print(f"Build failed: {result['error']}")
 
 # 3. Test the built database
-objects = access_list_objects("C:\\builds\\mydb_v1.0.accdb")
+objects = vcs_list_objects("C:\\builds\\mydb_v1.0.accdb")
 print(f"Built database contains {len(objects['queries'])} queries")
 ```
 
@@ -239,13 +239,13 @@ def develop_feature(db_path, src_path, feature_name):
     
     while not feature_complete:
         # 1. Export current state
-        access_export_database(db_path, src_path, object_types=["modules"])
+        vcs_export_database(db_path, src_path, object_types=["modules"])
         
         # 2. Make incremental changes
         # (AI agent modifies code)
         
         # 3. Merge changes
-        access_import_objects(db_path, src_path)
+        vcs_import_objects(db_path, src_path)
         
         # 4. Test
         test_result = run_tests(db_path)
@@ -296,7 +296,7 @@ mydb.src/
 
 ```python
 # Always check for errors
-result = access_export_database(db_path, src_path)
+result = vcs_export_database(db_path, src_path)
 
 if not result["success"]:
     print(f"Export failed: {result.get('error')}")

@@ -259,7 +259,7 @@ Supported levels: `debug`, `info`, `warning`, `error`
 ## Cancellation Support
 
 Operations can be cancelled by either:
-1. **MCP side** - Agent calls `access_cancel_operation(operation_id)`
+1. **MCP side** - Agent calls `vcs_cancel_operation(operation_id)`
 2. **VBA side** - User cancels via UI, VBA sends `cancelled` callback
 
 ### Cancellation Flow
@@ -465,7 +465,7 @@ When an operation is already running for a database:
     "active_operation_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
     "active_command": "Export",
     "elapsed_seconds": 45.2,
-    "hint": "Wait for the current operation to complete, or cancel it with access_cancel_operation()"
+    "hint": "Wait for the current operation to complete, or cancel it with vcs_cancel_operation()"
 }
 ```
 
@@ -474,7 +474,7 @@ When an operation is already running for a database:
 When an agent receives a busy response, it can:
 
 1. **Wait** - Retry after the current operation completes
-2. **Cancel** - Call `access_cancel_operation(active_operation_id)` if the user wants to interrupt
+2. **Cancel** - Call `vcs_cancel_operation(active_operation_id)` if the user wants to interrupt
 3. **Report** - Inform the user that an operation is in progress
 
 ### VBA Considerations

@@ -2,21 +2,25 @@
 MCP tool definitions for msaccess-vcs-mcp.
 
 This module provides database version control tools for AI assistants working with
-Microsoft Access databases. All tools support exporting to source files, importing
-from source, and tracking changes.
+Microsoft Access databases. All tools use the ``vcs_`` prefix to indicate they
+control the VCS add-in, not the Access application itself.
 
 **Getting Started Workflow:**
-1. Use access_list_objects() to see what's in a database
-2. Use access_export_database() to export all objects to source directory
+1. Use vcs_list_objects() to see what's in a database
+2. Use vcs_export_database() to export all objects to source directory
 3. Edit source files using your preferred tools
-4. Use access_diff_database() to see what changed
-5. Use access_import_objects() or access_rebuild_database() to apply changes
+4. Use vcs_diff_database() to see what changed
+5. Use vcs_import_objects() or vcs_rebuild_database() to apply changes
 
 **Key Features:**
 - Export Access objects to git-friendly text files
 - Import objects from source files back into Access
 - Rebuild entire databases from source
 - Track changes between database and source
+- Export/import individual objects by name and type
+- Execute read-only SQL queries via the add-in's DAO connection
+- Call existing VBA functions or run agent-generated VBA code
+- Read/write add-in options for session-level configuration
 - Read operations always available, write operations require permission
 - Long-running operations support progress reporting via callbacks
 """
@@ -79,7 +83,7 @@ def _check_database_busy(database_path: str) -> dict[str, Any] | None:
             "active_operation_id": busy_status["operation_id"],
             "active_command": busy_status["command"],
             "elapsed_seconds": busy_status["elapsed_seconds"],
-            "hint": "Wait for the current operation to complete, or cancel it with access_cancel_operation()"
+            "hint": "Wait for the current operation to complete, or cancel it with vcs_cancel_operation()"
         }
     return None
 
@@ -90,13 +94,14 @@ mcp = FastMCP(
     instructions=(
         "Microsoft Access version control MCP server. "
         "Export Access database objects to source files, import them back, "
-        "rebuild databases from source, and track changes.\n\n"
+        "rebuild databases from source, and track changes. "
+        "All tools use the vcs_ prefix.\n\n"
         "**Recommended workflow:**\n"
-        "1. Use access_export_database() to export all objects to source directory\n"
+        "1. Use vcs_export_database() to export all objects to source directory\n"
         "2. Edit source files using your preferred tools\n"
-        "3. Use access_import_objects() to merge changes back into database\n"
-        "4. Use access_rebuild_database() to create fresh database from source\n"
-        "5. Use access_diff_database() to see what changed\n\n"
+        "3. Use vcs_import_objects() to merge changes back into database\n"
+        "4. Use vcs_rebuild_database() to create fresh database from source\n"
+        "5. Use vcs_diff_database() to see what changed\n\n"
         "**Configuration:**\n"
         "Set ACCESS_VCS_DATABASE to your target database path.\n"
         "Set ACCESS_VCS_DISABLE_WRITES=true to prevent database modifications."
@@ -105,7 +110,7 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-async def access_export_database(
+async def vcs_export_database(
     database_path: str,
     output_dir: str,
     object_types: list[str] | None = None,
@@ -123,13 +128,13 @@ async def access_export_database(
     
     Examples:
         # Export entire database (quick/fast save - only changed objects)
-        access_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
+        vcs_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
         
         # Full export (all objects, regardless of changes)
-        access_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb", full_export=True)
+        vcs_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb", full_export=True)
         
         # Export only queries and modules
-        access_export_database(
+        vcs_export_database(
             "C:\\\\db.accdb", 
             "C:\\\\src\\\\mydb",
             object_types=["queries", "modules"]
@@ -299,7 +304,7 @@ async def access_export_database(
 
 
 @mcp.tool()
-def access_list_objects(database_path: str) -> dict[str, Any]:
+def vcs_list_objects(database_path: str) -> dict[str, Any]:
     """
     List all objects in an Access database.
     
@@ -308,7 +313,7 @@ def access_list_objects(database_path: str) -> dict[str, Any]:
     
     Examples:
         # List all objects
-        access_list_objects("C:\\\\db.accdb")
+        vcs_list_objects("C:\\\\db.accdb")
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
@@ -371,7 +376,7 @@ def access_list_objects(database_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def access_diff_database(
+def vcs_diff_database(
     database_path: str,
     source_dir: str,
     show_details: bool = False
@@ -384,10 +389,10 @@ def access_diff_database(
     
     Examples:
         # Basic diff
-        access_diff_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
+        vcs_diff_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
         
         # Detailed diff with line-by-line comparison
-        access_diff_database(
+        vcs_diff_database(
             "C:\\\\db.accdb",
             "C:\\\\src\\\\mydb",
             show_details=True
@@ -412,7 +417,7 @@ def access_diff_database(
         src_path = validate_source_directory(source_dir)
         
         # Get objects from database
-        db_objects = access_list_objects(str(db_path))
+        db_objects = vcs_list_objects(str(db_path))
         if not db_objects.get("success"):
             return db_objects
         
@@ -458,7 +463,7 @@ def access_diff_database(
 
 
 @mcp.tool()
-async def access_import_objects(
+async def vcs_import_objects(
     database_path: str,
     source_dir: str,
     object_types: list[str] | None = None,
@@ -475,10 +480,10 @@ async def access_import_objects(
     
     Examples:
         # Import all objects
-        access_import_objects("C:\\\\db.accdb", "C:\\\\src\\\\mydb", overwrite=True)
+        vcs_import_objects("C:\\\\db.accdb", "C:\\\\src\\\\mydb", overwrite=True)
         
         # Import only queries
-        access_import_objects(
+        vcs_import_objects(
             "C:\\\\db.accdb",
             "C:\\\\src\\\\mydb",
             object_types=["queries"],
@@ -618,7 +623,7 @@ async def access_import_objects(
 
 
 @mcp.tool()
-async def access_rebuild_database(
+async def vcs_rebuild_database(
     source_dir: str,
     output_path: str,
     template_path: str | None = None
@@ -634,10 +639,10 @@ async def access_rebuild_database(
     
     Examples:
         # Rebuild from source
-        access_rebuild_database("C:\\\\src\\\\mydb", "C:\\\\output\\\\rebuilt.accdb")
+        vcs_rebuild_database("C:\\\\src\\\\mydb", "C:\\\\output\\\\rebuilt.accdb")
         
         # Rebuild using template
-        access_rebuild_database(
+        vcs_rebuild_database(
             "C:\\\\src\\\\mydb",
             "C:\\\\output\\\\rebuilt.accdb",
             template_path="C:\\\\templates\\\\blank.accdb"
@@ -784,7 +789,7 @@ async def access_rebuild_database(
 
 
 @mcp.tool()
-def access_get_version_info() -> dict[str, Any]:
+def vcs_get_version_info() -> dict[str, Any]:
     """
     Get version information for MCP server, MSAccess VCS add-in, and Access application.
     
@@ -800,7 +805,7 @@ def access_get_version_info() -> dict[str, Any]:
     
     Examples:
         # Get version information
-        access_get_version_info()
+        vcs_get_version_info()
     
     Returns:
         Dictionary with:
@@ -836,7 +841,7 @@ def access_get_version_info() -> dict[str, Any]:
 
 
 @mcp.tool()
-def access_cancel_operation(operation_id: str) -> dict[str, Any]:
+def vcs_cancel_operation(operation_id: str) -> dict[str, Any]:
     """
     Cancel a running async operation.
     
@@ -850,7 +855,7 @@ def access_cancel_operation(operation_id: str) -> dict[str, Any]:
     
     Examples:
         # Cancel an export operation
-        access_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
+        vcs_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
     
     Args:
         operation_id: The UUID of the operation to cancel
@@ -901,7 +906,7 @@ def access_cancel_operation(operation_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def access_check_vba_compiled(database_path: str) -> dict[str, Any]:
+def vcs_check_vba_compiled(database_path: str) -> dict[str, Any]:
     """
     Check if VBA code in an Access database is compiled.
     
@@ -910,7 +915,7 @@ def access_check_vba_compiled(database_path: str) -> dict[str, Any]:
     
     Examples:
         # Check compilation state
-        result = access_check_vba_compiled("C:\\\\db.accdb")
+        result = vcs_check_vba_compiled("C:\\\\db.accdb")
         if result["compiled"]:
             print("Code is compiled")
         else:
@@ -955,7 +960,7 @@ def access_check_vba_compiled(database_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def access_compile_vba(
+def vcs_compile_vba(
     database_path: str,
     suppress_warnings: bool = False
 ) -> dict[str, Any]:
@@ -970,7 +975,7 @@ def access_compile_vba(
     
     Examples:
         # Compile VBA code
-        result = access_compile_vba("C:\\\\db.accdb", suppress_warnings=True)
+        result = vcs_compile_vba("C:\\\\db.accdb", suppress_warnings=True)
         if result["success"]:
             print("Compilation successful!")
         else:
@@ -1012,3 +1017,425 @@ def access_compile_vba(
             "success": False,
             "error": str(e),
         }
+
+
+@mcp.tool()
+def vcs_export_object(
+    database_path: str,
+    object_type: str,
+    object_name: str
+) -> dict[str, Any]:
+    """
+    Export a single named database object to source files.
+    
+    Exports one object (query, form, report, module, table, or macro) to its
+    source file representation. Much faster than a full database export when
+    you only need to refresh one object.
+    
+    Examples:
+        vcs_export_object("C:\\\\db.accdb", "query", "qryCustomers")
+        vcs_export_object("C:\\\\db.accdb", "form", "frmMain")
+        vcs_export_object("C:\\\\db.accdb", "module", "modUtils")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        object_type: Type of object: "query", "form", "report", "module", "table", "macro"
+        object_name: Name of the object to export
+    
+    Returns:
+        Dictionary with success status, file path, and any errors
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("ExportObject", object_type, object_name)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "result": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_import_object(
+    database_path: str,
+    object_type: str,
+    object_name: str
+) -> dict[str, Any]:
+    """
+    Import a single named object from source files into the database.
+    
+    Loads one object from its source file back into the Access database.
+    The source file must exist in the project's export folder.
+    
+    Examples:
+        vcs_import_object("C:\\\\db.accdb", "query", "qryCustomers")
+        vcs_import_object("C:\\\\db.accdb", "module", "modUtils")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        object_type: Type of object: "query", "form", "report", "module", "table", "macro"
+        object_name: Name of the object to import
+    
+    Returns:
+        Dictionary with success status and any errors
+    """
+    try:
+        config = get_config()
+        check_write_permission(config)
+        
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("ImportObject", object_type, object_name)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "result": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except PermissionError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_execute_sql(
+    database_path: str,
+    sql: str,
+    max_rows: int = 100
+) -> dict[str, Any]:
+    """
+    Execute a read-only SELECT query against the database via the add-in's DAO connection.
+    
+    Runs a SELECT statement and returns the results as JSON rows. Only SELECT
+    statements are allowed -- INSERT, UPDATE, DELETE, and DDL are rejected.
+    
+    Useful for inspecting MSysObjects, MSysQueries, table data, and query results
+    without needing a separate database connection.
+    
+    Examples:
+        vcs_execute_sql("C:\\\\db.accdb", "SELECT Name, Type FROM MSysObjects WHERE Type=5")
+        vcs_execute_sql("C:\\\\db.accdb", "SELECT * FROM Customers", max_rows=50)
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        sql: SELECT statement to execute
+        max_rows: Maximum number of rows to return (default: 100)
+    
+    Returns:
+        Dictionary with rows, rowCount, and truncated flag
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("ExecuteSQL", sql, max_rows)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "result": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_call_vba(
+    database_path: str,
+    function_name: str,
+    args: list[str] | None = None
+) -> dict[str, Any]:
+    """
+    Call an existing public VBA function by name.
+    
+    Invokes a function that already exists in the database or a loaded library
+    via Application.Run. Lighter weight than vcs_run_vba since there is no
+    temp module creation or compilation step.
+    
+    Examples:
+        vcs_call_vba("C:\\\\db.accdb", "MyModule.GetQuerySQL", ["qryCustomers"])
+        vcs_call_vba("C:\\\\db.accdb", "Version Control.API", ["GetVCSVersion"])
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        function_name: Fully qualified function name (e.g., "ModuleName.FunctionName")
+        args: Optional list of string arguments to pass to the function
+    
+    Returns:
+        Dictionary with the function's return value or error
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            call_args = args or []
+            
+            try:
+                if len(call_args) == 0:
+                    result = app.Run(function_name)
+                elif len(call_args) == 1:
+                    result = app.Run(function_name, call_args[0])
+                elif len(call_args) == 2:
+                    result = app.Run(function_name, call_args[0], call_args[1])
+                elif len(call_args) == 3:
+                    result = app.Run(function_name, call_args[0], call_args[1], call_args[2])
+                else:
+                    return {
+                        "success": False,
+                        "error": "Maximum 3 arguments supported for vcs_call_vba"
+                    }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"VBA function call failed: {e}",
+                    "function": function_name,
+                }
+            
+            return {
+                "success": True,
+                "result": str(result) if result is not None else None,
+                "function": function_name,
+            }
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_run_vba(
+    database_path: str,
+    code: str
+) -> dict[str, Any]:
+    """
+    Execute agent-generated VBA code in a temporary module.
+    
+    Sends a block of VBA code to the add-in's RunVBA method, which handles the
+    full lifecycle: creates a temp module, wraps the code in a function with error
+    handling, compiles the project to validate, executes, captures the result,
+    removes the temp module, and returns structured JSON.
+    
+    **Requires McpAllowRunVBA option to be enabled** (default: off).
+    Enable via vcs_set_option or the VCS Options form.
+    
+    The agent's code should set the function return value. Example:
+        Dim result As String
+        result = CurrentDb.QueryDefs("qryCustomers").SQL
+        _MCP_TempFunction = result
+    
+    Examples:
+        vcs_run_vba("C:\\\\db.accdb", "_MCP_TempFunction = CurrentDb.TableDefs.Count")
+        vcs_run_vba("C:\\\\db.accdb", "Dim qd As DAO.QueryDef\\nSet qd = CurrentDb.QueryDefs(\\"qryTest\\")\\n_MCP_TempFunction = qd.SQL")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        code: VBA code to execute (statements, not just an expression)
+    
+    Returns:
+        Dictionary with success, result, and any compile or runtime errors
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("RunVBA", code)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "result": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_set_option(
+    database_path: str,
+    option_name: str,
+    value: str | bool | int
+) -> dict[str, Any]:
+    """
+    Set a VCS add-in option for the current session.
+    
+    Changes take effect immediately but do not persist to vcs-options.json
+    until explicitly saved. Useful for controlling add-in behavior during
+    a testing session (e.g., enabling debug output).
+    
+    Examples:
+        vcs_set_option("C:\\\\db.accdb", "ShowDebug", True)
+        vcs_set_option("C:\\\\db.accdb", "McpAllowRunVBA", True)
+        vcs_set_option("C:\\\\db.accdb", "MaxLogFiles", 50)
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        option_name: Name of the VCS option property
+        value: Value to set
+    
+    Returns:
+        Dictionary with success status and the option that was set
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("SetOption", option_name, value)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "result": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_get_option(
+    database_path: str,
+    option_name: str
+) -> dict[str, Any]:
+    """
+    Read a VCS add-in option value.
+    
+    Returns the current value of any VCS add-in option property.
+    
+    Examples:
+        vcs_get_option("C:\\\\db.accdb", "ShowDebug")
+        vcs_get_option("C:\\\\db.accdb", "McpAllowRunVBA")
+        vcs_get_option("C:\\\\db.accdb", "ExportFormatVersion")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        option_name: Name of the VCS option property to read
+    
+    Returns:
+        Dictionary with success status and the option value
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result = addin.call_sync("GetOption", option_name)
+            
+            # GetOption returns the raw value, not JSON
+            if isinstance(result, str) and result.startswith("{"):
+                try:
+                    parsed = json.loads(result)
+                    if isinstance(parsed, dict) and "success" in parsed:
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+            
+            return {
+                "success": True,
+                "option": option_name,
+                "value": result,
+            }
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def vcs_get_log(
+    database_path: str,
+    log_type: str = "Export"
+) -> dict[str, Any]:
+    """
+    Read the most recent operation log file.
+    
+    Finds and returns the content of the most recent log file matching the
+    specified type (Export, Build, etc.) from the source folder's logs directory.
+    
+    Examples:
+        vcs_get_log("C:\\\\db.accdb")
+        vcs_get_log("C:\\\\db.accdb", log_type="Build")
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+        log_type: Type of log to read: "Export" (default) or "Build"
+    
+    Returns:
+        Dictionary with log content, path, and success status
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("GetLogContent", log_type)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "content": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}

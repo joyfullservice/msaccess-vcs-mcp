@@ -85,10 +85,10 @@ This test verifies the complete workflow from export through modify to merge bui
 #### Step 1: Export Database
 
 ```python
-from msaccess_vcs_mcp.tools import access_export_database
+from msaccess_vcs_mcp.tools import vcs_export_database
 
 # Export test database
-result = access_export_database(
+result = vcs_export_database(
     "C:\\test\\TestDB.accdb",
     "C:\\test\\TestDB.src"
 )
@@ -128,10 +128,10 @@ print("✓ Query modified")
 #### Step 3: Merge Changes
 
 ```python
-from msaccess_vcs_mcp.tools import access_import_objects
+from msaccess_vcs_mcp.tools import vcs_import_objects
 
 # Merge source changes into database
-result = access_import_objects(
+result = vcs_import_objects(
     "C:\\test\\TestDB.accdb",
     "C:\\test\\TestDB.src"
 )
@@ -146,11 +146,11 @@ print("✓ Merge successful")
 #### Step 4: Verify Changes
 
 ```python
-from msaccess_vcs_mcp.tools import access_list_objects
+from msaccess_vcs_mcp.tools import vcs_list_objects
 from msaccess_vcs_mcp.access_com.connection import AccessConnection
 
 # List objects to verify query exists
-objects = access_list_objects("C:\\test\\TestDB.accdb")
+objects = vcs_list_objects("C:\\test\\TestDB.accdb")
 print(f"Queries: {[q['name'] for q in objects['queries']]}")
 
 # Read the modified query SQL directly
@@ -169,10 +169,10 @@ print("✓ Changes verified in database")
 #### Step 5: Build from Source
 
 ```python
-from msaccess_vcs_mcp.tools import access_rebuild_database
+from msaccess_vcs_mcp.tools import vcs_rebuild_database
 
 # Build fresh database from source
-result = access_rebuild_database(
+result = vcs_rebuild_database(
     "C:\\test\\TestDB.src",
     "C:\\test\\TestDB_built.accdb"
 )
@@ -190,12 +190,12 @@ print("✓ Build from source successful")
 
 ```python
 # Export both databases and compare
-access_export_database(
+vcs_export_database(
     "C:\\test\\TestDB.accdb",
     "C:\\test\\TestDB_original.src"
 )
 
-access_export_database(
+vcs_export_database(
     "C:\\test\\TestDB_built.accdb",
     "C:\\test\\TestDB_rebuilt.src"
 )
@@ -228,10 +228,10 @@ from pathlib import Path
 import win32com.client
 
 from msaccess_vcs_mcp.tools import (
-    access_export_database,
-    access_import_objects,
-    access_rebuild_database,
-    access_list_objects
+    vcs_export_database,
+    vcs_import_objects,
+    vcs_rebuild_database,
+    vcs_list_objects
 )
 
 
@@ -263,7 +263,7 @@ class TestEndToEndWorkflow:
         src_path = tmp_path / "TestDB.src"
         
         # 1. Export
-        result = access_export_database(
+        result = vcs_export_database(
             test_db_path,
             str(src_path)
         )
@@ -282,19 +282,19 @@ class TestEndToEndWorkflow:
         query_file.write_text(modified, encoding='utf-8-sig')
         
         # 3. Merge changes
-        result = access_import_objects(
+        result = vcs_import_objects(
             test_db_path,
             str(src_path)
         )
         assert result["success"]
         
         # 4. Verify changes
-        objects = access_list_objects(test_db_path)
+        objects = vcs_list_objects(test_db_path)
         assert any(q["name"] == "TestQuery" for q in objects["queries"])
         
         # 5. Build from source
         built_db = tmp_path / "TestDB_built.accdb"
-        result = access_rebuild_database(
+        result = vcs_rebuild_database(
             str(src_path),
             str(built_db)
         )
@@ -320,7 +320,7 @@ addin_path = config["ACCESS_VCS_ADDIN_PATH"]
 
 # Should fail gracefully
 try:
-    result = access_export_database("test.accdb", "test.src")
+    result = vcs_export_database("test.accdb", "test.src")
     assert not result["success"]
     assert "not found" in result.get("error", "").lower()
 except RuntimeError as e:
@@ -330,13 +330,13 @@ except RuntimeError as e:
 ### Test Permission Denied
 
 ```python
-from msaccess_vcs_mcp.tools import access_import_objects
+from msaccess_vcs_mcp.tools import vcs_import_objects
 import os
 
 # Without write permission
 os.environ["ACCESS_VCS_ALLOW_WRITES"] = "false"
 
-result = access_import_objects("test.accdb", "test.src")
+result = vcs_import_objects("test.accdb", "test.src")
 assert not result["success"]
 assert "permission" in result["error"].lower()
 ```
@@ -344,7 +344,7 @@ assert "permission" in result["error"].lower()
 ### Test Invalid Database Path
 
 ```python
-result = access_export_database(
+result = vcs_export_database(
     "C:\\NonExistent\\Database.accdb",
     "C:\\test\\output"
 )
@@ -355,11 +355,11 @@ assert not result["success"]
 
 ```python
 # First export
-result1 = access_export_database("test.accdb", "test.src")
+result1 = vcs_export_database("test.accdb", "test.src")
 count1 = result1["exported_count"]
 
 # Second export without changes (should be fast)
-result2 = access_export_database("test.accdb", "test.src")
+result2 = vcs_export_database("test.accdb", "test.src")
 count2 = result2["exported_count"]
 
 # Fast save should export fewer objects
@@ -374,7 +374,7 @@ assert count2 <= count1
 import time
 
 start = time.time()
-result = access_export_database("large.accdb", "large.src")
+result = vcs_export_database("large.accdb", "large.src")
 duration = time.time() - start
 
 print(f"Exported {result['exported_count']} objects in {duration:.2f}s")
@@ -385,7 +385,7 @@ print(f"Average: {duration/result['exported_count']:.3f}s per object")
 
 ```python
 start = time.time()
-result = access_import_objects("large.accdb", "large.src")
+result = vcs_import_objects("large.accdb", "large.src")
 duration = time.time() - start
 
 print(f"Merge build completed in {duration:.2f}s")

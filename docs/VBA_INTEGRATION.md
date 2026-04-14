@@ -420,10 +420,10 @@ End Sub
 # test_integration.py
 import os
 import filecmp
-from msaccess_vcs_mcp.tools import access_export_database
+from msaccess_vcs_mcp.tools import vcs_export_database
 
 # Export with Python tool
-access_export_database("test.accdb", "python_export")
+vcs_export_database("test.accdb", "python_export")
 
 # Export with VBA tool (manual or automated)
 # compare_exports.vbs
