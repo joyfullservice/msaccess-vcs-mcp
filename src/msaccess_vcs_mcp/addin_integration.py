@@ -295,9 +295,9 @@ class VCSAddinIntegration:
         export_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            # Use HandleRibbonCommand to trigger the same flow as ribbon button
-            # This shows the full UI with progress dialogs
-            self._call_addin_function("HandleRibbonCommand", "btnExport")
+            # Call VCS API directly (Export or FullExport based on flag)
+            command = "FullExport" if full_export else "Export"
+            self._call_addin_function(command)
             
             # Check for log file to confirm export completed
             log_path = os.path.join(export_path, "Export.log")
@@ -334,8 +334,7 @@ class VCSAddinIntegration:
         export_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            # Use HandleRibbonCommand to trigger the same flow as ribbon button
-            self._call_addin_function("HandleRibbonCommand", "btnExportVBA")
+            self._call_addin_function("ExportVBA")
             
             log_path = os.path.join(export_path, "Export.log")
             
@@ -377,8 +376,7 @@ class VCSAddinIntegration:
         source_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            # Use HandleRibbonCommand to trigger the same flow as ribbon button
-            self._call_addin_function("HandleRibbonCommand", "btnMergeBuild")
+            self._call_addin_function("MergeBuild")
             
             log_path = os.path.join(source_path, "Build.log")
             
@@ -419,11 +417,10 @@ class VCSAddinIntegration:
             - message: Status message
         """
         try:
-            # If output_path specified, use BuildAs, otherwise use Build
-            if output_path:
-                self._call_addin_function("HandleRibbonCommand", "btnBuildAs", source_folder)
-            else:
-                self._call_addin_function("HandleRibbonCommand", "btnBuild", source_folder)
+            # Build always takes an optional source folder argument.
+            # BuildAs is interactive-only (shows file dialogs), so we use
+            # Build for both cases in headless mode.
+            self._call_addin_function("Build", source_folder)
             
             log_path = os.path.join(source_folder, "Build.log")
             

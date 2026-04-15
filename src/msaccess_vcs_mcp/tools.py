@@ -207,7 +207,7 @@ async def vcs_export_database(
             return busy_error
         
         # Determine export command
-        vba_only = object_types and set(object_types) == {"modules"}
+        vba_only = object_types and set(t.lower().strip() for t in object_types) <= {"module", "modules"}
         if vba_only:
             command = "ExportVBA"
         elif full_export:
@@ -1059,24 +1059,36 @@ def vcs_compile_vba(
 def vcs_export_object(
     database_path: str,
     object_type: str,
-    object_name: str
+    object_name: str = ""
 ) -> dict[str, Any]:
     """
-    Export a single named database object to source files.
+    Export a single database object or component type to source files.
     
-    Exports one object (query, form, report, module, table, or macro) to its
-    source file representation. Much faster than a full database export when
-    you only need to refresh one object.
+    Exports one object to its source file representation. Much faster than a
+    full database export when you only need to refresh one object.
+    
+    Accepts singular or plural type names. For single-file component types
+    (like vbe_project or db_property), the object_name is ignored.
     
     Examples:
         vcs_export_object("C:\\\\db.accdb", "query", "qryCustomers")
         vcs_export_object("C:\\\\db.accdb", "form", "frmMain")
         vcs_export_object("C:\\\\db.accdb", "module", "modUtils")
+        vcs_export_object("C:\\\\db.accdb", "imex_spec", "MyImportSpec")
+        vcs_export_object("C:\\\\db.accdb", "vbe_project")
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
-        object_type: Type of object: "query", "form", "report", "module", "table", "macro"
-        object_name: Name of the object to export
+        object_type: Type of object. Core types: "query", "form", "report",
+            "module", "table", "macro". Extended types: "table_data",
+            "table_data_macro", "relation", "saved_spec", "imex_spec",
+            "theme", "shared_image", "vbe_form", "command_bar".
+            Single-file types (no name needed): "vbe_project", "vbe_reference",
+            "project", "connection", "db_property", "project_property",
+            "document", "hidden_attribute", "nav_pane_group".
+            Plural forms and common aliases are also accepted.
+        object_name: Name of the object to export. Required for multi-file
+            types, ignored for single-file types.
     
     Returns:
         Dictionary with success status, file path, and any errors
@@ -1109,22 +1121,35 @@ def vcs_export_object(
 def vcs_import_object(
     database_path: str,
     object_type: str,
-    object_name: str
+    object_name: str = ""
 ) -> dict[str, Any]:
     """
-    Import a single named object from source files into the database.
+    Import a single object or component type from source files into the database.
     
     Loads one object from its source file back into the Access database.
     The source file must exist in the project's export folder.
     
+    Accepts singular or plural type names. For single-file component types
+    (like vbe_project or db_property), the object_name is ignored.
+    
     Examples:
         vcs_import_object("C:\\\\db.accdb", "query", "qryCustomers")
         vcs_import_object("C:\\\\db.accdb", "module", "modUtils")
+        vcs_import_object("C:\\\\db.accdb", "imex_spec", "MyImportSpec")
+        vcs_import_object("C:\\\\db.accdb", "vbe_project")
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
-        object_type: Type of object: "query", "form", "report", "module", "table", "macro"
-        object_name: Name of the object to import
+        object_type: Type of object. Core types: "query", "form", "report",
+            "module", "table", "macro". Extended types: "table_data",
+            "table_data_macro", "relation", "saved_spec", "imex_spec",
+            "theme", "shared_image", "vbe_form", "command_bar".
+            Single-file types (no name needed): "vbe_project", "vbe_reference",
+            "project", "connection", "db_property", "project_property",
+            "document", "hidden_attribute", "nav_pane_group".
+            Plural forms and common aliases are also accepted.
+        object_name: Name of the object to import. Required for multi-file
+            types, ignored for single-file types.
     
     Returns:
         Dictionary with success status and any errors

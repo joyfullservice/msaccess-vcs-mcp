@@ -75,6 +75,23 @@ contradictory guidance.
 
 ---
 
+## 2026-04-15 — Object type normalization lives in VBA, not Python
+
+**Trigger**: `vcs_export_object` and `vcs_import_object` only supported 6 core Access object types (query, form, report, module, table, macro). The add-in's `eDatabaseComponentType` enum defines 24+ types (relations, IMEX specs, VBE project, themes, etc.) that couldn't be exported individually. Additionally, the MCP tools used plural strings (`"queries"`) in `vcs_export_database` but singular (`"query"`) in `vcs_export_object`, creating inconsistency that confused AI agents.
+
+**Options explored**:
+- **Python-side normalization map**. A `normalize_object_type()` helper in the MCP server that maps plural/alias forms to canonical singular before passing to VBA. Only benefits MCP callers. Creates a second type map to maintain alongside VBA.
+- **VBA-side normalization via `ResolveComponentType` (chosen)**. A `Select Case` function in `modContainers.bas` that accepts singular, plural, and alias forms (50+ strings) and maps to `eDatabaseComponentType`. Benefits all callers — MCP tools, direct `Application.Run` API calls, any future integration. Python becomes a transparent pass-through.
+- **Accept both in Python AND VBA**. Redundant and creates maintenance burden keeping two maps in sync.
+
+**Decision**: Type normalization lives entirely in VBA's `ResolveComponentType`. Python passes `object_type` strings through to VBA without validation. VBA returns structured error JSON for unrecognized types. `ExportObject` and `ImportObject` on `clsVersionControl` were extended to handle all 24 component types: core AccessObject types use the existing `ExportSingleObject` path; non-core types use `GetComponentClass` + `GetAllFromDB`. Single-file types (like `vbe_project`) don't require an `object_name` parameter.
+
+**What this rules out**: Adding new component types requires updating VBA's `ResolveComponentType` — the Python MCP layer does not need changes. If a Python-only consumer needs early validation without a COM roundtrip, they would need to maintain their own type list, but this is unlikely since the VBA error response is fast and descriptive.
+
+**Relevant files**: `modContainers.bas` (`ResolveComponentType`), `clsVersionControl.cls` (`ExportObject`, `ImportObject` rewritten), `tools.py` (docstrings updated, `object_name` made optional), `addin_integration.py` (no type-related changes).
+
+---
+
 ## 2026-04-15 — Structured JSONL usage logging via composite decorator
 
 **Trigger**: Need to troubleshoot and evaluate how AI agents use the MCP tools in practice — which tools are called, with what parameters, how often they fail, and how long they take. The `db-inspector-mcp` sibling project already has a proven logging implementation that was requested as the reference pattern.
@@ -115,6 +132,8 @@ contradictory guidance.
 ---
 
 ## 2026-04-14 — Eight new tools for per-object development workflow
+
+> **⚠ Partially superseded** (2026-04-15): `vcs_export_object` and `vcs_import_object` now support all 24 component types (not just the original 6 core types). Type normalization moved to VBA. See "Object type normalization lives in VBA, not Python" above.
 
 **Trigger**: All existing tools operated at the whole-database level. Agents had no way to export/import a single object, execute SQL, run VBA, or control add-in options — capabilities essential for the tight edit-import-compile-test loop needed during add-in development and general database development.
 
