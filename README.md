@@ -1,41 +1,36 @@
 # msaccess-vcs-mcp
 
-A lightweight MCP server that provides AI agent integration for the [MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-integration). This tool acts as a bridge, allowing AI assistants to work with Microsoft Access databases through version control operations.
-
-## Architecture
-
-This MCP tool is a **lightweight wrapper** around the MSAccess VCS add-in, delegating all export/import/build operations to the battle-tested add-in:
-
-```
-AI Agent → MCP Tool (Python) → VCS Add-in (VBA) → Access Database
-              ↓
-       Path validation
-       Permission checks
-       Result formatting
-```
+A lightweight MCP server (Model Context Protocol server) that provides AI agent integration for the [MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-integration). This tool acts as a bridge, allowing AI assistants (e.g., Cursor, Claude Code, and other MCP-compatible clients) to work with Microsoft Access databases through version control operations.
 
 ## Features
 
 - **Full Export**: Export all database objects (forms, reports, queries, modules, macros, etc.)
 - **Fast Save**: Incremental exports (only changed objects)
+- **Per-Object Operations**: Export or import individual objects by name and type
 - **Merge Build**: Import source changes into existing database
 - **Build from Source**: Create fresh database from source files
 - **Object Inventory**: List all objects in an Access database
 - **Change Tracking**: Compare database against source files
-- **Write Operations**: Enabled by default, optional disable for safety
-- **Safety Guardrails**: Path validation and permission checks
+- **SQL Queries**: Execute read-only SELECT queries via the add-in's DAO connection
+- **VBA Execution**: Call existing VBA functions or run agent-generated code
+- **Async Operations**: Long-running exports/builds report progress via HTTP callbacks
+- **Add-in Options**: Read and write VCS add-in settings at runtime
+- **Safety Guardrails**: Path validation, permission checks, and write-disable mode
 
-All export/import operations leverage the comprehensive MSAccess VCS add-in, ensuring consistency and reliability.
+## Architecture
 
-## Why This Tool?
+This MCP server is a **lightweight wrapper** around the MSAccess VCS add-in, delegating all database operations to the battle-tested add-in:
 
-While SQL Server, PostgreSQL, and other databases have excellent MCP tools, **Microsoft Access is underserved**. This tool fills that gap by:
+```
+AI Agent -> MCP Server (Python) -> VCS Add-in (VBA) -> Access Database
+                |
+          Path validation
+          Permission checks
+          Result formatting
+          Async progress tracking
+```
 
-- **AI Agent Integration**: Allows AI assistants to work with Access databases
-- **Proven Export/Import**: Uses the MSAccess VCS add-in with years of development
-- **Complete Feature Set**: All Access object types supported (forms, reports, queries, modules, macros, tables)
-- **Version Control Friendly**: Text-based exports work seamlessly with git
-- **Collaborative Development**: Multiple developers can work independently and merge changes
+All business logic lives in VBA. The MCP layer validates inputs, manages async lifecycle, and formats responses.
 
 ## Prerequisites
 
@@ -44,45 +39,23 @@ While SQL Server, PostgreSQL, and other databases have excellent MCP tools, **Mi
 - **pywin32**: Python COM interface (installed automatically)
 - **MSAccess VCS Add-in**: Must be installed ([download latest release](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest))
 
-## Installation
+## Getting Started
 
-### Basic Installation
+The quickest way to get running is with [uvx](https://docs.astral.sh/uv/guides/tools/) (the tool runner from uv). No cloning or virtual environments needed.
+
+### 1. Install uv
 
 ```bash
-# Clone the repository
-git clone https://github.com/joyfullservice/msaccess-vcs-mcp.git
-cd msaccess-vcs-mcp
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Create and activate a virtual environment (recommended)
-python -m venv venv
-
-# On Windows:
-venv\Scripts\activate
-
-# Install in development mode (editable install)
-pip install -e ".[dev]"
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-**Note:** The `-e` flag installs the package in "editable" mode, which means changes to the source code are immediately reflected without needing to reinstall.
+### 2. Install the MSAccess VCS Add-in
 
-### Windows PATH Configuration
-
-After installation, you may see warnings about scripts not being on PATH. If you need to run `msaccess-vcs-mcp` from the command line, add the Python Scripts directory to your PATH:
-
-**PowerShell (run as Administrator):**
-```powershell
-$scriptsPath = "$env:LOCALAPPDATA\Python\pythoncore-3.14-64\Scripts"
-$currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($currentPath -notlike "*$scriptsPath*") {
-    [Environment]::SetEnvironmentVariable("Path", "$currentPath;$scriptsPath", "User")
-}
-```
-
-After updating PATH, restart your terminal (or Cursor) for changes to take effect.
-
-### Install MSAccess VCS Add-in
-
-**Important:** This MCP tool requires the MSAccess VCS add-in to be installed.
+This MCP server requires the MSAccess VCS add-in to be installed.
 
 1. Download the [latest release](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest) from GitHub
 2. Extract `Version Control.accda` to a trusted location
@@ -91,138 +64,94 @@ After updating PATH, restart your terminal (or Cursor) for changes to take effec
 
 The add-in will be installed to `%AppData%\MSAccessVCS\Version Control.accda` by default.
 
-### Environment Configuration
+### 3. Register the MCP server
 
-Configure your target database by creating a `.env` file:
+Add the server entry to your MCP client config. Both Cursor and Claude Code use the same `mcpServers` format, just in different files:
 
-```bash
-# Create .env file in project root
-# Add your database path:
+| Client | Project-level config | User-level (global) config |
+|--------|---------------------|---------------------------|
+| Cursor | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
+| Claude Code | `.mcp.json` | `~/.claude.json` |
 
-ACCESS_VCS_DATABASE=C:\Projects\MyApp\database.accdb
-
-# Optional: Use custom add-in path
-# ACCESS_VCS_ADDIN_PATH=C:\Custom\Path\Version Control.accda
-
-# Optional: Disable database writes for safety
-# ACCESS_VCS_DISABLE_WRITES=true
-```
-
-The tool will work with the database specified in `ACCESS_VCS_DATABASE`. You can also pass database paths directly to tool functions.
-
-## Quick Start
-
-Get up and running with msaccess-vcs-mcp in Cursor in just a few steps:
-
-### Step 1: Install the Package
-
-Make sure the package is installed (if you haven't already):
-
-```bash
-pip install -e ".[dev]"
-```
-
-Verify the command is available:
-
-```bash
-msaccess-vcs-mcp --help
-```
-
-### Step 2: Configure Cursor
-
-The MCP configuration file (`.cursor/mcp.json`) is already created in this repository:
+Add this to the appropriate config file:
 
 ```json
 {
   "mcpServers": {
     "msaccess-vcs-mcp": {
-      "command": "msaccess-vcs-mcp",
-      "env": {
-        "ACCESS_VCS_DATABASE": "C:\\Projects\\MyApp\\database.accdb"
-      }
+      "command": "uvx",
+      "args": ["msaccess-vcs-mcp@latest"]
     }
   }
 }
 ```
 
-**Note:** If you're using this in a different project, create `.cursor/mcp.json` in your project root with the above content.
+The `@latest` suffix ensures `uvx` always pulls the latest version from [PyPI](https://pypi.org/project/msaccess-vcs-mcp/) instead of using a cached copy.
 
-### Step 3: Set Up Your Configuration
-
-Create a `.env` file in your project root with your database path:
+**Alternative for Claude Code** -- you can use the CLI instead of editing JSON:
 
 ```bash
-# Target database for your project
+claude mcp add msaccess-vcs-mcp -- uvx msaccess-vcs-mcp@latest
+```
+
+### 4. Configure your database
+
+Create a `.env` file in your project root:
+
+```bash
+# Target database for this project
 ACCESS_VCS_DATABASE=C:\Projects\MyApp\database.accdb
 
-# Optional: Disable writes for safety
+# Optional: Disable database writes for safety
 # ACCESS_VCS_DISABLE_WRITES=true
 
 # Optional: Custom add-in path
 # ACCESS_VCS_ADDIN_PATH=C:\Custom\Path\Version Control.accda
 ```
 
-### Step 4: Restart Cursor
+### 5. Restart your client
 
-After creating the `.env` file:
-1. **Close Cursor completely** (not just the window - fully quit the application)
-2. **Reopen Cursor** in your project directory
-3. Cursor will automatically detect and load the MCP server
+Close and reopen Cursor or Claude Code. The MCP server will be detected and loaded automatically.
 
-### Step 5: Test the Tool
+### 6. Try it out
 
-Once Cursor restarts, the MCP tools will be available. You can test them by asking the AI assistant in Cursor to:
+Ask the AI assistant to use the VCS tools:
 
-- **List database objects:**
-  > "Can you list all objects in my Access database at C:\\mydb.accdb?"
+> "List all objects in my Access database using vcs_list_objects"
 
-- **Export database to source:**
-  > "Export my Access database to the src folder"
+> "Export my Access database to the src folder using vcs_export_database"
 
-- **Check what's changed:**
-  > "Compare my database against the source files and tell me what changed"
+> "Compare my database against the source files using vcs_diff_database"
 
 ## Configuration
+
+All configuration is done through environment variables, typically in a `.env` file in your project root. The server loads `.env` automatically at startup.
 
 ### Environment Variables
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `ACCESS_VCS_DATABASE` | Target database path | - | Recommended |
+| `ACCESS_VCS_DATABASE` | Target database path (.accdb, .accda, .mdb) | - | Recommended |
 | `ACCESS_VCS_ADDIN_PATH` | Path to VCS add-in file | `%AppData%\MSAccessVCS\Version Control.accda` | No |
-| `ACCESS_VCS_DISABLE_WRITES` | Disable database modifications | `false` | No |
+| `ACCESS_VCS_DISABLE_WRITES` | Disable database modifications (`true`/`false`) | `false` | No |
+| `ACCESS_VCS_CALLBACK_ENABLED` | Enable HTTP callback server for async progress | `true` | No |
+| `ACCESS_VCS_CALLBACK_HOST` | Host address for callback server | `127.0.0.1` | No |
+| `ACCESS_VCS_VALIDATE_STARTUP` | Validate Access and add-in availability on startup | `false` | No |
+| `ACCESS_VCS_ENABLE_LOGGING` | Enable structured JSONL usage logging | `false` | No |
+| `ACCESS_VCS_LOG_DIR` | Custom log directory (overrides auto-detection) | auto | No |
+| `ACCESS_VCS_LOG_MAX_SIZE_MB` | Max log file size before rotation | `10` | No |
+| `ACCESS_VCS_LOG_BACKUP_COUNT` | Number of rotated backup files to keep | `5` | No |
 
 ### Project-Specific Configuration
 
 This tool supports per-project configurations using `.env` files:
-
-#### `.cursor/mcp.json` (Version Controlled)
-
-Store non-sensitive settings that can be shared with your team:
-
-```json
-{
-  "mcpServers": {
-    "msaccess-vcs-mcp": {
-      "command": "msaccess-vcs-mcp",
-      "env": {
-        "ACCESS_VCS_DATABASE": "C:\\Projects\\MyApp\\database.accdb"
-      }
-    }
-  }
-}
-```
 
 #### `.env` (Gitignored, Project-Specific)
 
 Store project-specific database path:
 
 ```bash
-# Target database for this project
 ACCESS_VCS_DATABASE=C:\Projects\MyApp\database.accdb
-
-# Optional: Disable writes for safety
-# ACCESS_VCS_DISABLE_WRITES=true
 ```
 
 #### `.env.local` (Optional, Gitignored)
@@ -230,109 +159,291 @@ ACCESS_VCS_DATABASE=C:\Projects\MyApp\database.accdb
 For personal overrides that shouldn't affect the team:
 
 ```bash
-# Override for local development
 ACCESS_VCS_DATABASE=C:\Users\YourName\dev\testdb.accdb
 ```
 
 ### Environment Variable Precedence
 
-1. **MCP server `env` section** (highest priority) - values in `.cursor/mcp.json`
-2. **`.env.local`** - personal overrides
-3. **`.env`** - project-specific configuration (lowest priority)
-
-### Default Behavior
-
-- **Database writes**: Enabled by default. The add-in can modify your database.
-- **Add-in path**: Auto-detected at `%AppData%\MSAccessVCS\Version Control.accda`
-- **Target database**: Must be specified via `ACCESS_VCS_DATABASE` or passed to each tool function
+1. **MCP server `env` section** (highest priority) -- values set in the MCP config file
+2. **`.env.local`** -- personal overrides
+3. **`.env`** -- project-specific configuration (lowest priority)
 
 ## Available Tools
 
-### `vcs_export_database(database_path, output_dir, object_types)`
+### Database-Level Operations
+
+#### `vcs_export_database(database_path, output_dir, object_types, full_export)`
 
 Export Access database objects to source files via the VCS add-in.
 
-Supports all Access object types: tables, queries, forms, reports, modules, macros, and more. Uses fast save by default (only exports changed objects).
+Supports all Access object types: tables, queries, forms, reports, modules, macros, and more. Uses fast save by default (only exports changed objects). Long-running exports report progress via async callbacks.
 
 **Args:**
 - `database_path`: Path to Access database (.accdb, .accda, .mdb)
 - `output_dir`: Directory to export source files to
 - `object_types`: Optional list of types (defaults to all types)
+- `full_export`: If True, export all objects (not just changed ones)
 
-**Returns:**
-- `success`: Whether export succeeded
-- `exported_count`: Number of objects exported
-- `export_path`: Path where files were written
-- `objects_by_type`: Breakdown of what was exported
-- `log_path`: Path to Export.log file from add-in
+**Returns:** `success`, `exported_count`, `export_path`, `objects_by_type`, `log_path`
 
-**Example:**
 ```python
-# Export entire database
 vcs_export_database("C:\\db.accdb", "C:\\src\\mydb")
 
-# Export only VBA modules
-vcs_export_database(
-    "C:\\db.accdb", 
-    "C:\\src\\mydb",
-    object_types=["modules"]
-)
+vcs_export_database("C:\\db.accdb", "C:\\src\\mydb", object_types=["modules"])
 ```
 
-### `vcs_list_objects(database_path)`
+#### `vcs_list_objects(database_path)`
 
-List all objects in an Access database.
+List all objects in an Access database by type.
 
 **Args:**
 - `database_path`: Path to Access database
 
-**Returns:**
-- `tables`: List of table names
-- `queries`: List of query names with types
-- `modules`: List of module names
-- `forms`: List of form names (future)
-- `reports`: List of report names (future)
+**Returns:** `tables`, `queries`, `modules` (and `forms`, `reports` in future)
 
-**Example:**
 ```python
 vcs_list_objects("C:\\db.accdb")
 ```
 
-### `vcs_diff_database(database_path, source_dir, show_details)`
+#### `vcs_diff_database(database_path, source_dir, show_details)`
 
-Compare database objects against source files.
+Compare database objects against source files to see what has changed.
 
 **Args:**
 - `database_path`: Path to Access database
 - `source_dir`: Directory containing source files
-- `show_details`: If True, show detailed diff (future)
+- `show_details`: If True, show detailed diff
 
-**Returns:**
-- `queries`: What's different in queries
-- `modules`: What's different in modules
-- `new_in_db`: Objects in database but not in source
-- `new_in_source`: Objects in source but not in database
+**Returns:** `queries`, `modules`, `new_in_db`, `new_in_source`
 
-**Example:**
 ```python
 vcs_diff_database("C:\\db.accdb", "C:\\src\\mydb")
 ```
 
-### `vcs_import_objects(database_path, source_dir, object_types, overwrite)`
+#### `vcs_import_objects(database_path, source_dir, object_types, overwrite)`
 
 Import objects from source files into Access database using merge build.
 
-Merges source file changes into the existing database without requiring a full rebuild.
+Merges source file changes into the existing database without requiring a full rebuild. Requires write permission.
 
-**Note:** Database writes are enabled by default. Set `ACCESS_VCS_DISABLE_WRITES=true` to prevent modifications.
+**Args:**
+- `database_path`: Path to Access database
+- `source_dir`: Directory containing source files
+- `object_types`: Optional list of types to import
+- `overwrite`: If True, overwrite existing objects
 
-### `vcs_rebuild_database(source_dir, output_path, template_path)`
+```python
+vcs_import_objects("C:\\db.accdb", "C:\\src\\mydb")
+```
+
+#### `vcs_rebuild_database(source_dir, output_path, template_path)`
 
 Build a complete Access database from source files.
 
-Creates a fresh database from source files, useful for clean builds and distribution.
+Creates a fresh database from source files, useful for clean builds and distribution. Requires write permission.
 
-**Note:** Database writes are enabled by default. Set `ACCESS_VCS_DISABLE_WRITES=true` to prevent modifications.
+**Args:**
+- `source_dir`: Directory containing source files
+- `output_path`: Path for the new database file
+- `template_path`: Optional template database to use as starting point
+
+```python
+vcs_rebuild_database("C:\\src\\mydb", "C:\\output\\fresh.accdb")
+```
+
+### Per-Object Operations
+
+#### `vcs_export_object(database_path, object_type, object_name)`
+
+Export a single named database object to its source file. Much faster than a full database export when you only need to refresh one object.
+
+**Args:**
+- `database_path`: Path to Access database
+- `object_type`: Type of object: `"query"`, `"form"`, `"report"`, `"module"`, `"table"`, `"macro"`
+- `object_name`: Name of the object to export
+
+```python
+vcs_export_object("C:\\db.accdb", "query", "qryCustomers")
+vcs_export_object("C:\\db.accdb", "module", "modUtils")
+```
+
+#### `vcs_import_object(database_path, object_type, object_name)`
+
+Import a single named object from source files into the database. The source file must exist in the project's export folder. Requires write permission.
+
+**Args:**
+- `database_path`: Path to Access database
+- `object_type`: Type of object: `"query"`, `"form"`, `"report"`, `"module"`, `"table"`, `"macro"`
+- `object_name`: Name of the object to import
+
+```python
+vcs_import_object("C:\\db.accdb", "query", "qryCustomers")
+vcs_import_object("C:\\db.accdb", "module", "modUtils")
+```
+
+### SQL and VBA Execution
+
+#### `vcs_execute_sql(database_path, sql, max_rows)`
+
+Execute a read-only SELECT query against the database via the add-in's DAO connection.
+
+Only SELECT statements are allowed -- INSERT, UPDATE, DELETE, and DDL are rejected. Uses the same database connection the add-in already holds, avoiding file-locking conflicts.
+
+**Args:**
+- `database_path`: Path to Access database
+- `sql`: SELECT statement to execute
+- `max_rows`: Maximum number of rows to return (default: 100)
+
+**Returns:** `rows`, `rowCount`, `truncated`
+
+```python
+vcs_execute_sql("C:\\db.accdb", "SELECT Name, Type FROM MSysObjects WHERE Type=5")
+vcs_execute_sql("C:\\db.accdb", "SELECT * FROM Customers", max_rows=50)
+```
+
+#### `vcs_call_vba(database_path, function_name, args)`
+
+Call an existing public VBA function by name via `Application.Run`. Lighter weight than `vcs_run_vba` since there is no temp module creation or compilation step.
+
+**Args:**
+- `database_path`: Path to Access database
+- `function_name`: Fully qualified function name (e.g., `"ModuleName.FunctionName"`)
+- `args`: Optional list of string arguments (max 3)
+
+```python
+vcs_call_vba("C:\\db.accdb", "MyModule.GetQuerySQL", ["qryCustomers"])
+vcs_call_vba("C:\\db.accdb", "Version Control.API", ["GetVCSVersion"])
+```
+
+#### `vcs_run_vba(database_path, code)`
+
+Execute agent-generated VBA code in a temporary module.
+
+The add-in handles the full lifecycle: creates a temp module, wraps the code in a function with error handling, compiles the project to validate, executes, captures the result, removes the temp module, and returns structured JSON.
+
+**Requires `McpAllowRunVBA` option to be enabled** (default: off). Enable via `vcs_set_option` or the VCS Options form.
+
+**Args:**
+- `database_path`: Path to Access database
+- `code`: VBA code block to execute
+
+```python
+vcs_run_vba("C:\\db.accdb", "_MCP_TempFunction = CurrentDb.TableDefs.Count")
+```
+
+### VBA Compilation
+
+#### `vcs_check_vba_compiled(database_path)`
+
+Check if VBA code in an Access database is compiled. Returns the compilation state without attempting to compile. Useful for establishing a baseline before making code changes.
+
+**Args:**
+- `database_path`: Path to Access database
+
+**Returns:** `success`, `compiled`
+
+```python
+result = vcs_check_vba_compiled("C:\\db.accdb")
+# result["compiled"] -> True or False
+```
+
+#### `vcs_compile_vba(database_path, suppress_warnings)`
+
+Compile all VBA modules in an Access database and return success status.
+
+If compilation fails, do not proceed with code edits as there are existing compilation errors that must be fixed first.
+
+**Args:**
+- `database_path`: Path to Access database
+- `suppress_warnings`: If True, suppress message boxes during compilation
+
+**Returns:** `success`
+
+```python
+result = vcs_compile_vba("C:\\db.accdb", suppress_warnings=True)
+```
+
+### Add-in Options
+
+#### `vcs_set_option(database_path, option_name, value)`
+
+Set a VCS add-in option for the current session.
+
+Changes take effect immediately but do not persist to `vcs-options.json` until explicitly saved.
+
+**Args:**
+- `database_path`: Path to Access database
+- `option_name`: Name of the VCS option property
+- `value`: Value to set (string, boolean, or integer)
+
+```python
+vcs_set_option("C:\\db.accdb", "ShowDebug", True)
+vcs_set_option("C:\\db.accdb", "McpAllowRunVBA", True)
+```
+
+#### `vcs_get_option(database_path, option_name)`
+
+Read a VCS add-in option value.
+
+**Args:**
+- `database_path`: Path to Access database
+- `option_name`: Name of the VCS option property to read
+
+```python
+vcs_get_option("C:\\db.accdb", "ShowDebug")
+vcs_get_option("C:\\db.accdb", "McpAllowRunVBA")
+```
+
+### Diagnostics
+
+#### `vcs_get_version_info()`
+
+Get version information for MCP server, MSAccess VCS add-in, and Access application.
+
+Returns `mcp_version`, `vcs_version`, `access_version`, `bitness`, `target_database`, `addin_path`, `callback_url`, `async_available`, and any `errors` or `warnings`.
+
+```python
+vcs_get_version_info()
+```
+
+#### `vcs_cancel_operation(operation_id)`
+
+Cancel a running async operation. Requests cancellation of a long-running export, build, or import. The VBA add-in will detect the cancellation during its next DoEvents cycle.
+
+**Args:**
+- `operation_id`: UUID of the operation to cancel (returned by async tool calls)
+
+```python
+vcs_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
+```
+
+#### `vcs_get_log(database_path, log_type)`
+
+Read the most recent operation log file from the source folder's logs directory.
+
+**Args:**
+- `database_path`: Path to Access database
+- `log_type`: Type of log to read: `"Export"` (default) or `"Build"`
+
+```python
+vcs_get_log("C:\\db.accdb")
+vcs_get_log("C:\\db.accdb", log_type="Build")
+```
+
+## Async Operations
+
+Long-running operations (export, import, rebuild) support async execution with progress reporting. When the callback server is running (enabled by default), these operations:
+
+1. Spawn a detached VBA process via the add-in's `APIAsync` entry point
+2. Return immediately with an `operation_id`
+3. Receive progress updates via HTTP callbacks from VBA
+4. Support cancellation via `vcs_cancel_operation`
+
+The server automatically detects when another operation is in progress for the same database and returns a busy response with the active operation details.
+
+If the callback server is not available, operations fall back to synchronous execution.
+
+See [docs/VBA_CALLBACK_API.md](docs/VBA_CALLBACK_API.md) for the full callback protocol specification.
 
 ## Export Format
 
@@ -354,39 +465,18 @@ database.src/
 └── Export.log         # Operation log
 ```
 
-### Example Files
-
-**Query** (`queries/QueryName.sql`):
-```sql
-SELECT * FROM Customers WHERE Active = True
-```
-
-**VBA Module** (`modules/ModuleName.bas`):
-```vba
-Attribute VB_Name = "ModuleName"
-Option Compare Database
-Option Explicit
-
-Public Function MyFunction() As Boolean
-    MyFunction = True
-End Function
-```
-
 All files use **UTF-8 with BOM** encoding, which is critical for proper import back into Access.
 
 ## Workflows
 
 ### Version Control Workflow
 
-```bash
+```python
 # 1. Export database to source
 vcs_export_database("C:\\db.accdb", "C:\\src\\db")
 
 # 2. Initialize git (if not already done)
-cd C:\src\db
-git init
-git add .
-git commit -m "Initial export of database"
+# cd C:\src\db && git init && git add . && git commit -m "Initial export"
 
 # 3. Make changes in Access...
 
@@ -397,8 +487,25 @@ vcs_diff_database("C:\\db.accdb", "C:\\src\\db")
 vcs_export_database("C:\\db.accdb", "C:\\src\\db")
 
 # 6. Commit changes
-git add .
-git commit -m "Updated customer queries"
+# git add . && git commit -m "Updated customer queries"
+```
+
+### Per-Object Development Workflow
+
+```python
+# 1. Edit a VBA module in source files...
+
+# 2. Import just that module
+vcs_import_object("C:\\db.accdb", "module", "modUtils")
+
+# 3. Compile to validate
+vcs_compile_vba("C:\\db.accdb")
+
+# 4. Test via VBA
+vcs_call_vba("C:\\db.accdb", "modUtils.RunTests")
+
+# 5. Export the module back (picks up any Access-side formatting)
+vcs_export_object("C:\\db.accdb", "module", "modUtils")
 ```
 
 ### Integration with db-inspector-mcp
@@ -413,87 +520,110 @@ db_list_views(database="legacy")
 # 2. Export to version control (msaccess-vcs-mcp)
 vcs_export_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
 
-# 3. Make changes to source files...
+# 3. Run queries against the database (msaccess-vcs-mcp)
+vcs_execute_sql("C:\\legacy.accdb", "SELECT * FROM Customers WHERE Active = True")
 
-# 4. Validate changes (db-inspector-mcp)
+# 4. Cross-database comparison (db-inspector-mcp)
 db_compare_queries(
     "SELECT * FROM Customers",
     "SELECT * FROM Customers",
     database1="legacy",
-    database2="test"
+    database2="new"
 )
-
-# 5. Check what changed (msaccess-vcs-mcp)
-vcs_diff_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
 ```
 
-## Development
+## MCP Client Setup
 
-### Complete Setup
+### Cursor
 
-1. **Clone and navigate to the repository:**
-   ```bash
-   git clone https://github.com/joyfullservice/msaccess-vcs-mcp.git
-   cd msaccess-vcs-mcp
-   ```
+**Project-level** -- add `.cursor/mcp.json` to your project root (can be version-controlled for team sharing):
 
-2. **Create and activate a virtual environment:**
-   ```bash
-   python -m venv venv
-   
-   # Windows:
-   venv\Scripts\activate
-   ```
-
-3. **Install the package with development dependencies:**
-   ```bash
-   pip install -e ".[dev]"
-   ```
-
-4. **Run tests:**
-   ```bash
-   # Run all tests
-   pytest
-   
-   # Run with coverage report
-   pytest --cov=msaccess_vcs_mcp --cov-report=html
-   
-   # Run specific test file
-   pytest tests/test_config.py
-   ```
-
-### Project Structure
-
+```json
+{
+  "mcpServers": {
+    "msaccess-vcs-mcp": {
+      "command": "uvx",
+      "args": ["msaccess-vcs-mcp@latest"]
+    }
+  }
+}
 ```
-msaccess-vcs-mcp/
-├── src/
-│   └── msaccess_vcs_mcp/
-│       ├── __init__.py
-│       ├── main.py              # MCP server entry point
-│       ├── tools.py             # MCP tool definitions
-│       ├── config.py            # Configuration management
-│       ├── security.py          # Path validation & safety
-│       ├── addin_integration.py # VCS add-in integration
-│       └── access_com/
-│           ├── connection.py    # COM connection management
-│           └── dao_helpers.py   # DAO utility functions
-├── tests/                       # Test suite
-└── docs/                        # Documentation
-    ├── AGENT_WORKFLOWS.md       # AI agent usage patterns
-    ├── VBA_INTEGRATION.md       # Add-in integration details
-    ├── EXPORT_FORMATS.md        # Export format reference
-    └── TESTING.md               # Testing guide
+
+**User-level** -- add to `~/.cursor/mcp.json` to make the server available in all projects.
+
+### Claude Code
+
+**Project-level** -- add `.mcp.json` to your project root:
+
+```json
+{
+  "mcpServers": {
+    "msaccess-vcs-mcp": {
+      "command": "uvx",
+      "args": ["msaccess-vcs-mcp@latest"]
+    }
+  }
+}
 ```
+
+**CLI alternative** -- register without editing JSON:
+
+```bash
+claude mcp add msaccess-vcs-mcp -- uvx msaccess-vcs-mcp@latest
+```
+
+### Development Install
+
+For contributing or running from source:
+
+```bash
+git clone https://github.com/joyfullservice/msaccess-vcs-mcp.git
+cd msaccess-vcs-mcp
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
+pip install -e ".[dev]"
+```
+
+For development installs, use `python -m msaccess_vcs_mcp.main` as the command in your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "msaccess-vcs-mcp": {
+      "command": "python",
+      "args": ["-m", "msaccess_vcs_mcp.main"]
+    }
+  }
+}
+```
+
+### Troubleshooting
+
+If the MCP server doesn't load:
+
+1. **Check MCP logs** -- In Cursor, open the Command Palette (`Ctrl+Shift+P`) and look for MCP-related output. In Claude Code, check the terminal output.
+
+2. **Verify the command works** -- run `uvx msaccess-vcs-mcp --help` in your terminal.
+
+3. **Check your `.env` file** -- make sure it's in the project root, the database path is correct, and there are no syntax errors.
 
 ## Security Model
 
 ### Write Operations
 
-Database write operations (import, rebuild) are **enabled by default**. To prevent modifications:
+Database write operations (import, rebuild, run VBA) are **enabled by default**. To prevent modifications:
 
 ```bash
 ACCESS_VCS_DISABLE_WRITES=true
 ```
+
+### VBA Execution Permissions
+
+VBA execution has two tiers with separate permissions controlled via add-in options:
+
+- **`vcs_call_vba`**: Calls existing named functions via `Application.Run`. Controlled by `McpAllowCallVBA` (default: True).
+- **`vcs_run_vba`**: Executes agent-generated code via temp module. Controlled by `McpAllowRunVBA` (default: False). Must be explicitly enabled.
 
 ### Path Validation
 
@@ -509,37 +639,54 @@ For safety when working with production databases:
 2. Use export operations to review changes
 3. Enable writes only when ready to merge changes
 
-## Current Status
+## Development
 
-This MCP tool is **production-ready** as a lightweight wrapper around the MSAccess VCS add-in.
+### Running Tests
 
-### Completed Features ✓
-- [x] VCS add-in integration via COM automation
-- [x] Full database export (all object types)
-- [x] Fast save (incremental exports)
-- [x] Merge build (import changes into existing database)
-- [x] Build from source (create fresh database)
-- [x] Object inventory and diff operations
-- [x] Comprehensive documentation for AI agents
-- [x] Unit and integration tests
+Tests must run inside the project virtual environment:
 
-### Architecture Benefits ✓
-- **Leverage proven technology**: Uses the battle-tested MSAccess VCS add-in
-- **Complete feature set**: All Access object types supported out of the box
-- **Future-proof**: Add-in updates automatically benefit the MCP tool
-- **Minimal maintenance**: ~90% less code than reimplementing everything
+```bash
+# Activate the virtual environment first
+.\venv\Scripts\Activate.ps1          # Windows PowerShell
+# source venv/bin/activate           # macOS/Linux
 
-### Future Enhancements
+# Run all tests
+pytest
 
-Potential improvements that could be added:
+# Run with coverage report
+pytest --cov=msaccess_vcs_mcp --cov-report=html
 
-- **Enhanced diff**: Detailed line-by-line comparison of changes
-- **Git integration**: Auto-commit after export, pull before merge
-- **Conflict resolution UI**: Help agents resolve merge conflicts
-- **VBA code analysis**: Parse and understand VBA for better assistance
-- **Schema migrations**: Help agents plan and execute schema changes
+# Skip integration tests (require Access installed)
+pytest -m "not integration"
+```
 
-These features would build upon the existing add-in integration, not replace it.
+### Project Structure
+
+```
+msaccess-vcs-mcp/
+├── src/
+│   └── msaccess_vcs_mcp/
+│       ├── __init__.py
+│       ├── main.py              # MCP server entry point
+│       ├── tools.py             # MCP tool definitions (17 tools)
+│       ├── config.py            # Configuration management
+│       ├── usage_logging.py     # Structured JSONL usage logging
+│       ├── security.py          # Path validation & safety
+│       ├── validation.py        # Component validation
+│       ├── addin_integration.py # VCS add-in integration
+│       ├── operation_manager.py # Async operation tracking
+│       ├── callback_server.py   # HTTP callback server
+│       └── access_com/
+│           ├── connection.py    # COM connection management
+│           └── dao_helpers.py   # DAO utility functions
+├── tests/                       # Test suite
+└── docs/                        # Documentation
+    ├── AGENT_WORKFLOWS.md       # AI agent usage patterns
+    ├── VBA_INTEGRATION.md       # Add-in integration details
+    ├── VBA_CALLBACK_API.md      # Async callback protocol
+    ├── EXPORT_FORMATS.md        # Export format reference
+    └── TESTING.md               # Testing guide
+```
 
 ## License
 
@@ -549,14 +696,7 @@ MIT License - see LICENSE file for details.
 
 Contributions are welcome! Please open an issue or submit a pull request.
 
-## Acknowledgments
-
-- Wraps the excellent [MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-integration) by Adam Waller
-- Architecture inspired by [db-inspector-mcp](https://github.com/joyfullservice/db-inspector-mcp)
-- Built with [FastMCP](https://github.com/modelcontextprotocol/mcp)
-- Fills a critical gap in Access database tooling for AI agents
-
 ## Related Tools
 
-- **[db-inspector-mcp](https://github.com/joyfullservice/db-inspector-mcp)**: Database introspection and migration validation
-- Works seamlessly with msaccess-vcs-mcp for complete Access workflows
+- **[db-inspector-mcp](https://github.com/joyfullservice/db-inspector-mcp)**: Cross-database MCP server for introspection and migration validation
+- **[MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-integration)**: The VBA add-in that powers all export/import operations

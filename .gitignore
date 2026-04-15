@@ -80,5 +80,8 @@ Thumbs.db
 # Obsidian (optional personal notes)
 .obsidian/
 
+# Usage logs (development mode)
+logs/
+
 # Cursor project-specific
 .cursor/

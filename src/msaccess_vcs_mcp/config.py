@@ -120,7 +120,7 @@ def load_config() -> dict[str, Any]:
     callback_enabled_str = os.getenv("ACCESS_VCS_CALLBACK_ENABLED", "true").lower()
     callback_enabled = callback_enabled_str not in ("false", "0", "no", "off")
     
-    return {
+    config = {
         # Database settings
         "ACCESS_VCS_DATABASE": os.getenv("ACCESS_VCS_DATABASE", ""),
         "ACCESS_VCS_ADDIN_PATH": os.getenv("ACCESS_VCS_ADDIN_PATH", get_default_addin_path()),
@@ -130,9 +130,22 @@ def load_config() -> dict[str, Any]:
         "ACCESS_VCS_CALLBACK_ENABLED": callback_enabled,
         "ACCESS_VCS_CALLBACK_HOST": os.getenv("ACCESS_VCS_CALLBACK_HOST", "127.0.0.1"),
         
+        # Logging configuration
+        "ACCESS_VCS_ENABLE_LOGGING": os.getenv("ACCESS_VCS_ENABLE_LOGGING", "false").lower() == "true",
+        "ACCESS_VCS_LOG_DIR": os.getenv("ACCESS_VCS_LOG_DIR", ""),
+        "ACCESS_VCS_LOG_MAX_SIZE_MB": int(os.getenv("ACCESS_VCS_LOG_MAX_SIZE_MB", "10")),
+        "ACCESS_VCS_LOG_BACKUP_COUNT": int(os.getenv("ACCESS_VCS_LOG_BACKUP_COUNT", "5")),
+        
         # Runtime values (set by main.py after callback server starts)
         # ACCESS_VCS_CALLBACK_URL - set in environment after server starts
     }
+
+    # Reset logging state so changes to ACCESS_VCS_ENABLE_LOGGING,
+    # ACCESS_VCS_LOG_DIR, etc. take effect without a server restart.
+    from .usage_logging import reset_logging
+    reset_logging()
+
+    return config
 
 
 def get_config() -> dict[str, Any]:

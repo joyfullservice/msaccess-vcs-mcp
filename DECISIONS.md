@@ -75,6 +75,28 @@ contradictory guidance.
 
 ---
 
+## 2026-04-15 — Structured JSONL usage logging via composite decorator
+
+**Trigger**: Need to troubleshoot and evaluate how AI agents use the MCP tools in practice — which tools are called, with what parameters, how often they fail, and how long they take. The `db-inspector-mcp` sibling project already has a proven logging implementation that was requested as the reference pattern.
+
+**Options explored**:
+- **Python stdlib `logging` module**. Standard approach, but produces unstructured text. Not suitable for programmatic analysis of tool call patterns.
+- **FastMCP middleware / hooks**. FastMCP doesn't expose a per-tool middleware layer. Would require monkey-patching internals.
+- **Composite decorator with JSONL file logging (chosen)**. Follows the exact pattern from `db-inspector-mcp`: a `with_logging(name)` decorator that wraps each tool, writing one JSON object per line to a rotating file. A `vcs_tool("name")` composite decorator chains config reload → usage logging → `mcp.tool()` registration, replacing bare `@mcp.tool()` on all 17 tools. Controlled by `ACCESS_VCS_ENABLE_LOGGING` env var (default: off).
+
+**Decision**: Adopted the `db-inspector-mcp` pattern with project-specific adaptations:
+- Env var prefix changed from `DB_MCP_` to `ACCESS_VCS_` for consistency with existing config.
+- Removed `database`/`dialect` fields from log entries (VCS tools pass `database_path` as a regular parameter, so it's captured in `parameters` automatically).
+- Error pattern categories tailored to VCS-specific errors (COM errors, add-in errors, VBA compile errors, write-disabled, database busy) instead of SQL-specific patterns.
+- `Context` objects from FastMCP are filtered out of logged parameters (not serializable).
+- Lazy initialization: disabled state is not cached (`_logging_enabled` stays `None`) so the first tool call after `load_config()` populates the env can still enable logging. Failure state _is_ cached to avoid retry spam.
+
+**What this rules out**: Log entries do not include tool return values — only parameters, success/failure, errors, and timing. If result logging is needed later, the `with_logging` decorator already receives the result for serialization checking and could be extended. The `vcs_tool` decorator calls `load_config()` on every tool invocation (one `stat()` call); if this becomes a performance concern, the hot-reload pattern from `db-inspector-mcp` (mtime-based gating) could be adopted.
+
+**Relevant files**: `src/msaccess_vcs_mcp/usage_logging.py` (new), `src/msaccess_vcs_mcp/tools.py` (`vcs_tool` decorator, all 17 tools migrated), `src/msaccess_vcs_mcp/config.py` (logging env vars + `reset_logging` on reload), `src/msaccess_vcs_mcp/main.py` (startup status), `.env.example`, `tests/test_usage_logging.py` (36 tests), `AGENTS.md` (new), `.gitignore` (`logs/`).
+
+---
+
 ## 2026-04-14 — Tool naming: `vcs_*` prefix
 
 **Trigger**: Tools were originally named `access_*` (e.g., `access_export_database`). A separate MCP server for Access (`MCP-Access` by bclothier) also uses `access_*` prefixed tools. Both servers might be loaded in the same agent session. Additionally, these tools control the VCS add-in, not the Access application itself, so `access_*` was a misnomer.

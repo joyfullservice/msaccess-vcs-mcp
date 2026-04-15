@@ -26,6 +26,8 @@ control the VCS add-in, not the Access application itself.
 """
 
 import asyncio
+import functools
+import inspect
 import json
 import os
 from datetime import datetime
@@ -36,7 +38,7 @@ from mcp.server.fastmcp import FastMCP, Context
 
 from .access_com.connection import AccessConnection
 from .access_com.dao_helpers import list_query_defs, list_table_defs
-from .config import get_config, get_callback_url
+from .config import get_config, get_callback_url, load_config
 from .addin_integration import VCSAddinIntegration
 from .security import (
     validate_database_path,
@@ -44,6 +46,7 @@ from .security import (
     validate_source_directory,
     check_write_permission,
 )
+from .usage_logging import with_logging
 
 
 def _get_operation_manager():
@@ -104,12 +107,45 @@ mcp = FastMCP(
         "5. Use vcs_diff_database() to see what changed\n\n"
         "**Configuration:**\n"
         "Set ACCESS_VCS_DATABASE to your target database path.\n"
-        "Set ACCESS_VCS_DISABLE_WRITES=true to prevent database modifications."
+        "Set ACCESS_VCS_DISABLE_WRITES=true to prevent database modifications.\n\n"
+        "**Usage logs:**\n"
+        "When ACCESS_VCS_ENABLE_LOGGING=true is set in the project .env, all tool calls are "
+        "logged to a JSON Lines file. The default location is "
+        "`~/.msaccess-vcs-mcp/logs/usage.jsonl` (in the user's home directory). "
+        "Override with ACCESS_VCS_LOG_DIR. Each line is a JSON object with fields: "
+        "timestamp, event, tool, parameters, success, error, error_pattern, "
+        "execution_time_ms."
     )
 )
 
 
-@mcp.tool()
+def vcs_tool(name: str):
+    """Register an MCP tool with config reload and usage logging.
+
+    Composes three concerns in the correct order so that every tool call:
+    1. Refreshes configuration from ``.env``.
+    2. Initializes or re-initializes usage logging with the current env vars.
+    3. Executes the tool body and logs the outcome.
+    """
+    def decorator(func):
+        logged = with_logging(name)(func)
+
+        if inspect.iscoroutinefunction(func):
+            @functools.wraps(func)
+            async def with_refresh(*args, **kwargs):
+                load_config()
+                return await logged(*args, **kwargs)
+        else:
+            @functools.wraps(func)
+            def with_refresh(*args, **kwargs):
+                load_config()
+                return logged(*args, **kwargs)
+
+        return mcp.tool()(with_refresh)
+    return decorator
+
+
+@vcs_tool("vcs_export_database")
 async def vcs_export_database(
     database_path: str,
     output_dir: str,
@@ -303,7 +339,7 @@ async def vcs_export_database(
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_list_objects")
 def vcs_list_objects(database_path: str) -> dict[str, Any]:
     """
     List all objects in an Access database.
@@ -375,7 +411,7 @@ def vcs_list_objects(database_path: str) -> dict[str, Any]:
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_diff_database")
 def vcs_diff_database(
     database_path: str,
     source_dir: str,
@@ -462,7 +498,7 @@ def vcs_diff_database(
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_import_objects")
 async def vcs_import_objects(
     database_path: str,
     source_dir: str,
@@ -622,7 +658,7 @@ async def vcs_import_objects(
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_rebuild_database")
 async def vcs_rebuild_database(
     source_dir: str,
     output_path: str,
@@ -788,7 +824,7 @@ async def vcs_rebuild_database(
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_get_version_info")
 def vcs_get_version_info() -> dict[str, Any]:
     """
     Get version information for MCP server, MSAccess VCS add-in, and Access application.
@@ -840,7 +876,7 @@ def vcs_get_version_info() -> dict[str, Any]:
     return result
 
 
-@mcp.tool()
+@vcs_tool("vcs_cancel_operation")
 def vcs_cancel_operation(operation_id: str) -> dict[str, Any]:
     """
     Cancel a running async operation.
@@ -905,7 +941,7 @@ def vcs_cancel_operation(operation_id: str) -> dict[str, Any]:
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_check_vba_compiled")
 def vcs_check_vba_compiled(database_path: str) -> dict[str, Any]:
     """
     Check if VBA code in an Access database is compiled.
@@ -959,7 +995,7 @@ def vcs_check_vba_compiled(database_path: str) -> dict[str, Any]:
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_compile_vba")
 def vcs_compile_vba(
     database_path: str,
     suppress_warnings: bool = False
@@ -1019,7 +1055,7 @@ def vcs_compile_vba(
         }
 
 
-@mcp.tool()
+@vcs_tool("vcs_export_object")
 def vcs_export_object(
     database_path: str,
     object_type: str,
@@ -1069,7 +1105,7 @@ def vcs_export_object(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_import_object")
 def vcs_import_object(
     database_path: str,
     object_type: str,
@@ -1121,7 +1157,7 @@ def vcs_import_object(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_execute_sql")
 def vcs_execute_sql(
     database_path: str,
     sql: str,
@@ -1172,7 +1208,7 @@ def vcs_execute_sql(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_call_vba")
 def vcs_call_vba(
     database_path: str,
     function_name: str,
@@ -1236,7 +1272,7 @@ def vcs_call_vba(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_run_vba")
 def vcs_run_vba(
     database_path: str,
     code: str
@@ -1292,7 +1328,7 @@ def vcs_run_vba(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_set_option")
 def vcs_set_option(
     database_path: str,
     option_name: str,
@@ -1342,7 +1378,7 @@ def vcs_set_option(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_get_option")
 def vcs_get_option(
     database_path: str,
     option_name: str
@@ -1395,7 +1431,7 @@ def vcs_get_option(
         return {"success": False, "error": str(e)}
 
 
-@mcp.tool()
+@vcs_tool("vcs_get_log")
 def vcs_get_log(
     database_path: str,
     log_type: str = "Export"

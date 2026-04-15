@@ -141,6 +141,13 @@ def main() -> None:
     if callback_url:
         os.environ["ACCESS_VCS_CALLBACK_URL"] = callback_url
     
+    # Show logging status
+    from .usage_logging import is_logging_enabled, get_log_file_path
+    if is_logging_enabled():
+        print(f"Usage logging: {get_log_file_path()}", file=sys.stderr)
+    else:
+        print("Usage logging: disabled", file=sys.stderr)
+    
     # Import and run MCP server
     from .tools import mcp
     mcp.run(transport="stdio")

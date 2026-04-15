@@ -2,6 +2,23 @@
 
 This guide covers testing procedures for the MCP tool, including unit tests, integration tests, and end-to-end workflow testing.
 
+## Virtual Environment
+
+All test commands assume the project virtual environment is activated. Activate it before running any tests:
+
+```powershell
+cd C:\Repos\msaccess-vcs-mcp
+.\venv\Scripts\Activate.ps1
+```
+
+If the venv doesn't exist yet, create and install:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
+```
+
 ## Running Unit Tests
 
 Unit tests cover individual components without requiring Access or the VCS add-in:
@@ -14,7 +31,7 @@ pytest
 pytest --cov=msaccess_vcs_mcp --cov-report=html
 
 # Run specific test file
-pytest tests/test_addin_integration.py -v
+pytest tests/test_usage_logging.py -v
 
 # Run specific test
 pytest tests/test_addin_integration.py::TestVCSAddinIntegration::test_load_addin_success -v
@@ -72,11 +89,7 @@ pytest -m "not integration"
    └── TestDB_built.accdb    # Rebuilt database (will be created)
    ```
 
-2. **Install MCP tool in dev mode:**
-   ```bash
-   cd C:\Repos\msaccess-vcs-mcp
-   pip install -e ".[dev]"
-   ```
+2. **Activate virtual environment** (see [Virtual Environment](#virtual-environment) above)
 
 ### Manual End-to-End Test
 
