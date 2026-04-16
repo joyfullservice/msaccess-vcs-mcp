@@ -168,6 +168,19 @@ def get_callback_url() -> str | None:
     return os.environ.get("ACCESS_VCS_CALLBACK_URL")
 
 
+def get_session_id() -> str | None:
+    """
+    Get the MCP server session ID for option override scoping.
+    
+    Generated at startup and stored in the environment. Used to create
+    session-specific override files (mcp/options-{session_id}.json).
+    
+    Returns:
+        Session ID string or None if not set
+    """
+    return os.environ.get("ACCESS_VCS_SESSION_ID")
+
+
 def validate_access_installation() -> None:
     """
     Verify that Microsoft Access COM automation is available.

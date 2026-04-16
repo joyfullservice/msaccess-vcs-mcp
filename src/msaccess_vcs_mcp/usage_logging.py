@@ -461,6 +461,38 @@ def with_logging(tool_name: str):
     return decorator
 
 
+def log_code_execution(
+    tool_name: str,
+    database_path: str,
+    code: str,
+    code_type: str = "sql",
+) -> None:
+    """
+    Log a code execution attempt *before* it runs.
+
+    Written as a separate ``"code_execution"`` event so it can be found
+    quickly in the audit trail.  The full code/SQL text is preserved
+    without truncation — if the process crashes during execution, this
+    entry is the forensic record of what was attempted.
+
+    Args:
+        tool_name: MCP tool name (e.g. ``"vcs_execute_sql"``).
+        database_path: Target database path.
+        code: The SQL statement, VBA code block, or function call string.
+        code_type: ``"sql"``, ``"vba"``, or ``"vba_call"``.
+    """
+    if not _initialize_logging():
+        return
+
+    _write_log_entry({
+        "event": "code_execution",
+        "tool": tool_name,
+        "database": database_path,
+        "code_type": code_type,
+        "code": code,
+    })
+
+
 def get_log_file_path() -> Path | None:
     """
     Get the current log file path.

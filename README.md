@@ -321,7 +321,7 @@ Execute agent-generated VBA code in a temporary module.
 
 The add-in handles the full lifecycle: creates a temp module, wraps the code in a function with error handling, compiles the project to validate, executes, captures the result, removes the temp module, and returns structured JSON.
 
-**Requires `McpAllowRunVBA` option to be enabled** (default: off). Enable via `vcs_set_option` or the VCS Options form.
+**Requires `McpAllowRunVBA` option to be enabled** (default: off). The user must enable this manually in the VCS Options form — agents cannot set this option programmatically.
 
 **Args:**
 - `database_path`: Path to Access database
@@ -378,7 +378,6 @@ Changes take effect immediately but do not persist to `vcs-options.json` until e
 
 ```python
 vcs_set_option("C:\\db.accdb", "ShowDebug", True)
-vcs_set_option("C:\\db.accdb", "McpAllowRunVBA", True)
 ```
 
 #### `vcs_get_option(database_path, option_name)`
@@ -623,7 +622,7 @@ ACCESS_VCS_DISABLE_WRITES=true
 VBA execution has two tiers with separate permissions controlled via add-in options:
 
 - **`vcs_call_vba`**: Calls existing named functions via `Application.Run`. Controlled by `McpAllowCallVBA` (default: True).
-- **`vcs_run_vba`**: Executes agent-generated code via temp module. Controlled by `McpAllowRunVBA` (default: False). Must be explicitly enabled.
+- **`vcs_run_vba`**: Executes agent-generated code via temp module. Controlled by `McpAllowRunVBA` (default: False). Must be explicitly enabled by the user in the VCS Options form — agents cannot enable this option programmatically via `vcs_set_option`.
 
 ### Path Validation
 
@@ -631,6 +630,25 @@ All file paths are validated to prevent:
 - Access to system directories
 - Invalid file extensions
 - Non-existent paths (unless creating)
+
+### Code Execution Audit Trail
+
+When usage logging is enabled (`ACCESS_VCS_ENABLE_LOGGING=true`), every call to `vcs_execute_sql`, `vcs_call_vba`, or `vcs_run_vba` writes a `"code_execution"` event **before** the code runs. This entry preserves the full, untruncated SQL or VBA text alongside the target database path — providing a forensic record even if the process crashes during execution.
+
+```jsonc
+// Example log entry (written before execution)
+{
+  "event": "code_execution",
+  "tool": "vcs_execute_sql",
+  "database": "C:\\Projects\\mydb.accdb",
+  "code_type": "sql",
+  "code": "SELECT * FROM Customers WHERE Active = True",
+  "timestamp": "2026-04-15T18:30:00+00:00",
+  "version": "0.1.0"
+}
+```
+
+The standard post-execution `"tool_call"` event follows with success/error status and timing.
 
 ### Safe Workflow
 

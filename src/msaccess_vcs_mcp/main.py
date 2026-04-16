@@ -4,12 +4,16 @@ import asyncio
 import atexit
 import os
 import sys
+import uuid
 
 from .config import get_config, validate_access_installation
 
 
 # Global reference to callback server for cleanup
 _callback_server = None
+
+# Session ID generated at startup for option override scoping
+_session_id = uuid.uuid4().hex[:8]
 
 
 def _start_callback_server(config: dict) -> str | None:
@@ -73,6 +77,26 @@ def _stop_callback_server() -> None:
     if _callback_server:
         _callback_server.stop()
         _callback_server = None
+
+
+def _cleanup_session() -> None:
+    """End the MCP session on server shutdown, cleaning up override files."""
+    session_id = os.environ.get("ACCESS_VCS_SESSION_ID")
+    db_path = os.environ.get("ACCESS_VCS_DATABASE")
+    if not session_id or not db_path:
+        return
+    try:
+        from .access_com.connection import AccessConnection
+        from .addin_integration import VCSAddinIntegration
+        config = get_config()
+        with AccessConnection(db_path) as conn:
+            app, db = conn.connect()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            addin.call_sync("EndSession", session_id)
+            print(f"Session {session_id}: overrides cleaned up", file=sys.stderr)
+    except Exception as e:
+        print(f"Session cleanup skipped: {e}", file=sys.stderr)
 
 
 def main() -> None:
@@ -140,6 +164,11 @@ def main() -> None:
     # Store callback URL in environment for tools to access
     if callback_url:
         os.environ["ACCESS_VCS_CALLBACK_URL"] = callback_url
+    
+    # Store session ID for option override scoping
+    os.environ["ACCESS_VCS_SESSION_ID"] = _session_id
+    atexit.register(_cleanup_session)
+    print(f"Session ID: {_session_id}", file=sys.stderr)
     
     # Show logging status
     from .usage_logging import is_logging_enabled, get_log_file_path

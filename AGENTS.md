@@ -98,6 +98,10 @@ When `ACCESS_VCS_ENABLE_LOGGING=true`, every tool call is logged to a JSON Lines
 
 Each log entry includes: `timestamp`, `version`, `event`, `tool`, `parameters`, `success`, `error`, `error_pattern`, `execution_time_ms`.
 
+### Code Execution Audit Trail
+
+Tools that execute arbitrary code (`vcs_execute_sql`, `vcs_call_vba`, `vcs_run_vba`) write an additional `"code_execution"` event **before** execution begins. This entry preserves the full SQL/VBA text without truncation — critical for forensic review if an agent does something destructive. Fields: `event`, `tool`, `database`, `code_type` (`"sql"`, `"vba"`, `"vba_call"`), `code`.
+
 Rotation is automatic (`ACCESS_VCS_LOG_MAX_SIZE_MB`, default 10 MB; `ACCESS_VCS_LOG_BACKUP_COUNT`, default 5).
 
 ## Adding a New Tool

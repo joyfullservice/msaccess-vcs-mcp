@@ -75,6 +75,40 @@ contradictory guidance.
 
 ---
 
+## 2026-04-15 — Pre-execution audit logging for code execution tools
+
+**Trigger**: The existing usage logging captures tool parameters but truncates all strings to 500 characters and only writes after execution completes. For the three tools that execute arbitrary code against databases (`vcs_execute_sql`, `vcs_call_vba`, `vcs_run_vba`), this leaves two gaps: (1) a complex SQL query or VBA code block may be truncated beyond usefulness in a forensic review, and (2) if the process crashes during execution, no record of what was attempted exists.
+
+**Options explored**:
+- **Raise the truncation limit globally**. Simple, but inflates every log entry (file paths, option names, etc.) unnecessarily. Rotation would trigger sooner.
+- **Exempt specific parameter names from truncation** (e.g., `sql`, `code`). Mixes audit concerns into the general sanitization logic. Hard to extend cleanly.
+- **Dedicated `log_code_execution()` function with a separate event type (chosen)**. Writes a `"code_execution"` event *before* execution begins, with the full untruncated code/SQL and the target database path. The existing `with_logging` decorator continues to write the post-execution `"tool_call"` event with truncated parameters, success/error, and timing. Two complementary records: the audit trail (what was attempted) and the outcome (what happened).
+
+**Decision**: Added `log_code_execution(tool_name, database_path, code, code_type)` to `usage_logging.py`. Called from `vcs_execute_sql` (code_type=`"sql"`), `vcs_run_vba` (code_type=`"vba"`), and `vcs_call_vba` (code_type=`"vba_call"`) immediately after path validation but before any COM/database interaction. The `code` field is never truncated. The event goes to the same `usage.jsonl` file — no separate audit file — distinguished by `"event": "code_execution"`.
+
+**What this rules out**: Code execution entries have no upper size limit on the `code` field. In practice, VBA code blocks and SQL queries are small (under 10 KB). If an agent somehow generates megabyte-scale code strings, log rotation handles it, but this is not a realistic concern. If a separate audit file is ever wanted (e.g., for compliance), the `log_code_execution` function could be retargeted without changing call sites.
+
+**Relevant files**: `usage_logging.py` (`log_code_execution`), `tools.py` (call sites in `vcs_execute_sql`, `vcs_call_vba`, `vcs_run_vba`), `tests/test_usage_logging.py` (5 new tests).
+
+---
+
+## 2026-04-15 — Agents cannot enable McpAllowRunVBA programmatically
+
+**Trigger**: The `vcs_set_option` tool allowed agents to set any VCS option, including `McpAllowRunVBA` which gates arbitrary VBA code execution via `vcs_run_vba`. An agent could autonomously enable this option and then run arbitrary code without user awareness, undermining the security boundary that `McpAllowRunVBA` was designed to provide.
+
+**Options explored**:
+- **No guard, rely on default-off**. `McpAllowRunVBA` defaults to False, but nothing prevented an agent from calling `vcs_set_option("db.accdb", "McpAllowRunVBA", True)` as its first action. The docstrings even showed this as an example.
+- **Server-side blocklist in `vcs_set_option` (chosen)**. A case-insensitive check against a set of protected option names. Returns a descriptive error directing the user to enable the option manually via the VCS Options form.
+- **VBA-side enforcement**. Have the add-in's `SetOption` method refuse `McpAllowRunVBA` when called from MCP. Harder to implement since VBA doesn't know the calling context, and the error would be less clear.
+
+**Decision**: `vcs_set_option` blocks setting `McpAllowRunVBA` with a clear error message. The option requires explicit user consent via the VCS Options form in Access. Docstrings and README updated to stop suggesting agents can self-enable this option.
+
+**What this rules out**: Agents cannot autonomously escalate to arbitrary VBA execution. If future protected options emerge (e.g., a hypothetical `McpAllowDDL`), add them to the `PROTECTED_OPTIONS` set in `vcs_set_option`.
+
+**Relevant files**: `tools.py` (`vcs_set_option`), `README.md` (security section).
+
+---
+
 ## 2026-04-15 — Object type normalization lives in VBA, not Python
 
 **Trigger**: `vcs_export_object` and `vcs_import_object` only supported 6 core Access object types (query, form, report, module, table, macro). The add-in's `eDatabaseComponentType` enum defines 24+ types (relations, IMEX specs, VBE project, themes, etc.) that couldn't be exported individually. Additionally, the MCP tools used plural strings (`"queries"`) in `vcs_export_database` but singular (`"query"`) in `vcs_export_object`, creating inconsistency that confused AI agents.
@@ -180,3 +214,15 @@ contradictory guidance.
 **What this rules out**: `vcs_call_vba` is limited to public functions callable via `Application.Run` (max 3 args in current implementation). Private functions or functions requiring object parameters can't be called directly — use `vcs_run_vba` for those. If the 3-arg limit becomes a problem, the `InvokeTypes` + `pythoncom.Missing` padding pattern (used by MCP-Access) would support up to 30 args.
 
 **Relevant files**: `tools.py` (`vcs_call_vba`, `vcs_run_vba`), `clsVersionControl.cls` (`RunVBA`).
+
+---
+
+## 2026-04-15 — Session-scoped option overrides for MCP/API callers
+
+**Trigger**: `vcs_set_option` changes were silently discarded because the add-in reloads options from `vcs-options.json` at the start of every operation. The agent's overrides never persisted past the first subsequent export/build.
+
+**Decision**: The MCP server generates a session ID at startup (`uuid4().hex[:8]`), registers it with the add-in via `RegisterSession`, and `vcs_set_option` now writes overrides to a session-scoped file (`mcp/options-{session_id}.json`) in the export folder. The add-in's operation entry points load these overrides after `LoadProjectOptions` when `Operation.Source` is API/MCP. On shutdown, `atexit` calls `EndSession` to clean up the file. A `vcs_end_session` tool is also available for explicit mid-session cleanup.
+
+**What this rules out**: Session IDs don't persist across server restarts — the agent must re-set options if the server restarts. Stale override files are auto-cleaned after 30 days on the add-in side.
+
+**Relevant files**: `tools.py` (`vcs_set_option`, `vcs_end_session`), `main.py` (session ID, atexit), `config.py` (`get_session_id`). Add-in side: see `DECISIONS.md` in `msaccess-vcs-addin`.

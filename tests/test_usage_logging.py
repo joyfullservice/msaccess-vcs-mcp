@@ -12,6 +12,7 @@ from msaccess_vcs_mcp.usage_logging import (
     _initialize_logging,
     reset_logging,
     log_tool_call,
+    log_code_execution,
     with_logging,
     is_logging_enabled,
     get_log_file_path,
@@ -405,3 +406,111 @@ class TestHelpers:
     def test_get_log_file_path_when_disabled(self):
         with patch.dict(os.environ, {"ACCESS_VCS_ENABLE_LOGGING": "false"}, clear=False):
             assert get_log_file_path() is None
+
+
+class TestLogCodeExecution:
+    """Tests for log_code_execution() audit logging."""
+
+    def test_logs_sql_execution(self, tmp_path):
+        """SQL code execution is logged with event=code_execution."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_code_execution(
+                tool_name="vcs_execute_sql",
+                database_path="C:\\test.accdb",
+                code="SELECT * FROM Customers WHERE Active = True",
+                code_type="sql",
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["event"] == "code_execution"
+        assert entry["tool"] == "vcs_execute_sql"
+        assert entry["database"] == "C:\\test.accdb"
+        assert entry["code_type"] == "sql"
+        assert entry["code"] == "SELECT * FROM Customers WHERE Active = True"
+
+    def test_logs_vba_execution(self, tmp_path):
+        """VBA code execution is logged with code_type=vba."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            vba_code = (
+                "Dim qd As DAO.QueryDef\n"
+                "Set qd = CurrentDb.QueryDefs(\"qryTest\")\n"
+                "_MCP_TempFunction = qd.SQL"
+            )
+            log_code_execution(
+                tool_name="vcs_run_vba",
+                database_path="C:\\test.accdb",
+                code=vba_code,
+                code_type="vba",
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["event"] == "code_execution"
+        assert entry["code_type"] == "vba"
+        assert "DAO.QueryDef" in entry["code"]
+
+    def test_logs_vba_call(self, tmp_path):
+        """VBA function calls are logged with code_type=vba_call."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_code_execution(
+                tool_name="vcs_call_vba",
+                database_path="C:\\test.accdb",
+                code="MyModule.DeleteAllRecords('tblCustomers')",
+                code_type="vba_call",
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["event"] == "code_execution"
+        assert entry["code_type"] == "vba_call"
+        assert "DeleteAllRecords" in entry["code"]
+
+    def test_code_not_truncated(self, tmp_path):
+        """Code content is preserved in full, not truncated like tool parameters."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            long_sql = "SELECT " + ", ".join(f"field_{i}" for i in range(200))
+            assert len(long_sql) > 500  # Exceeds normal truncation limit
+            log_code_execution(
+                tool_name="vcs_execute_sql",
+                database_path="C:\\test.accdb",
+                code=long_sql,
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["code"] == long_sql
+        assert "truncated" not in entry["code"]
+
+    def test_noop_when_disabled(self):
+        """No error when logging is disabled — call is silently skipped."""
+        with patch.dict(os.environ, {"ACCESS_VCS_ENABLE_LOGGING": "false"}, clear=False):
+            log_code_execution(
+                tool_name="vcs_execute_sql",
+                database_path="C:\\test.accdb",
+                code="SELECT 1",
+            )

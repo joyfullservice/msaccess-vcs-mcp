@@ -38,7 +38,7 @@ from mcp.server.fastmcp import FastMCP, Context
 
 from .access_com.connection import AccessConnection
 from .access_com.dao_helpers import list_query_defs, list_table_defs
-from .config import get_config, get_callback_url, load_config
+from .config import get_config, get_callback_url, get_session_id, load_config
 from .addin_integration import VCSAddinIntegration
 from .security import (
     validate_database_path,
@@ -46,7 +46,7 @@ from .security import (
     validate_source_directory,
     check_write_permission,
 )
-from .usage_logging import with_logging
+from .usage_logging import log_code_execution, with_logging
 
 
 def _get_operation_manager():
@@ -1211,6 +1211,7 @@ def vcs_execute_sql(
     """
     try:
         db_path = validate_database_path(database_path)
+        log_code_execution("vcs_execute_sql", str(db_path), sql, code_type="sql")
         
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
@@ -1260,11 +1261,14 @@ def vcs_call_vba(
     """
     try:
         db_path = validate_database_path(database_path)
+        call_args = args or []
+        call_description = function_name
+        if call_args:
+            call_description += f"({', '.join(repr(a) for a in call_args)})"
+        log_code_execution("vcs_call_vba", str(db_path), call_description, code_type="vba_call")
         
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
-            
-            call_args = args or []
             
             try:
                 if len(call_args) == 0:
@@ -1311,7 +1315,7 @@ def vcs_run_vba(
     removes the temp module, and returns structured JSON.
     
     **Requires McpAllowRunVBA option to be enabled** (default: off).
-    Enable via vcs_set_option or the VCS Options form.
+    The user must enable this manually in the VCS Options form.
     
     The agent's code should set the function return value. Example:
         Dim result As String
@@ -1331,6 +1335,7 @@ def vcs_run_vba(
     """
     try:
         db_path = validate_database_path(database_path)
+        log_code_execution("vcs_run_vba", str(db_path), code, code_type="vba")
         
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
@@ -1360,16 +1365,16 @@ def vcs_set_option(
     value: str | bool | int
 ) -> dict[str, Any]:
     """
-    Set a VCS add-in option for the current session.
+    Set a VCS add-in option for the current MCP session.
     
-    Changes take effect immediately but do not persist to vcs-options.json
-    until explicitly saved. Useful for controlling add-in behavior during
-    a testing session (e.g., enabling debug output).
+    Changes take effect immediately and persist across operations within
+    this session. The user's vcs-options.json is never modified -- overrides
+    are stored in a session-scoped file under the mcp/ subfolder of the
+    export directory. Stale override files are auto-cleaned after 30 days.
     
     Examples:
         vcs_set_option("C:\\\\db.accdb", "ShowDebug", True)
-        vcs_set_option("C:\\\\db.accdb", "McpAllowRunVBA", True)
-        vcs_set_option("C:\\\\db.accdb", "MaxLogFiles", 50)
+        vcs_set_option("C:\\\\db.accdb", "BreakOnError", True)
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
@@ -1379,6 +1384,17 @@ def vcs_set_option(
     Returns:
         Dictionary with success status and the option that was set
     """
+    PROTECTED_OPTIONS = {"mcpallowrunvba"}
+    if option_name.lower() in PROTECTED_OPTIONS:
+        return {
+            "success": False,
+            "error": (
+                f"The '{option_name}' option cannot be changed by agents. "
+                "It controls arbitrary VBA code execution and requires explicit "
+                "user consent. Enable it manually in the VCS Options form."
+            ),
+        }
+
     try:
         db_path = validate_database_path(database_path)
         
@@ -1388,6 +1404,11 @@ def vcs_set_option(
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin._app = app
+            
+            # Register session so the add-in scopes the override file correctly
+            session_id = get_session_id()
+            if session_id:
+                addin.call_sync("RegisterSession", session_id)
             
             result_json = addin.call_sync("SetOption", option_name, value)
             
@@ -1411,7 +1432,9 @@ def vcs_get_option(
     """
     Read a VCS add-in option value.
     
-    Returns the current value of any VCS add-in option property.
+    Returns the current in-memory value of any VCS add-in option property.
+    If session overrides have been applied via vcs_set_option, those
+    overridden values are reflected here.
     
     Examples:
         vcs_get_option("C:\\\\db.accdb", "ShowDebug")
@@ -1495,6 +1518,48 @@ def vcs_get_log(
                     return json.loads(result_json)
                 except json.JSONDecodeError:
                     return {"success": True, "content": result_json}
+            
+            return {"success": True, "result": result_json}
+    
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@vcs_tool("vcs_end_session")
+def vcs_end_session(
+    database_path: str,
+) -> dict[str, Any]:
+    """
+    End the current MCP session and remove all option overrides.
+    
+    Deletes the session-scoped override file and reloads the project options
+    to their original state. Called automatically on MCP server shutdown,
+    but can be called explicitly to clear overrides mid-conversation.
+    
+    Args:
+        database_path: Path to Access database (.accdb, .accda, .mdb)
+    
+    Returns:
+        Dictionary with success status
+    """
+    try:
+        db_path = validate_database_path(database_path)
+        session_id = get_session_id() or "default"
+        
+        with AccessConnection(str(db_path)) as conn:
+            app, db = conn.connect()
+            
+            config = get_config()
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin._app = app
+            
+            result_json = addin.call_sync("EndSession", session_id)
+            
+            if isinstance(result_json, str):
+                try:
+                    return json.loads(result_json)
+                except json.JSONDecodeError:
+                    return {"success": True, "result": result_json}
             
             return {"success": True, "result": result_json}
     
