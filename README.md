@@ -132,6 +132,7 @@ All configuration is done through environment variables, typically in a `.env` f
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `ACCESS_VCS_DATABASE` | Target database path (.accdb, .accda, .mdb) | - | Recommended |
+| `ACCESS_VCS_PROJECT_DIR` | Explicit path to the project containing your `.env` (overrides auto-discovery) | auto | No |
 | `ACCESS_VCS_ADDIN_PATH` | Path to VCS add-in file | `%AppData%\MSAccessVCS\Version Control.accda` | No |
 | `ACCESS_VCS_DISABLE_WRITES` | Disable database modifications (`true`/`false`) | `false` | No |
 | `ACCESS_VCS_CALLBACK_ENABLED` | Enable HTTP callback server for async progress | `true` | No |
@@ -167,6 +168,19 @@ ACCESS_VCS_DATABASE=C:\Users\YourName\dev\testdb.accdb
 1. **MCP server `env` section** (highest priority) -- values set in the MCP config file
 2. **`.env.local`** -- personal overrides
 3. **`.env`** -- project-specific configuration (lowest priority)
+
+### Using msaccess-vcs-mcp from Another Project
+
+When the server is installed once at the user level (in `~/.cursor/mcp.json` rather than per-project), it still needs to find each individual project's `.env` so that settings like `ACCESS_VCS_DATABASE` and `ACCESS_VCS_ENABLE_LOGGING` take effect. The server resolves the project root in the following order:
+
+1. **`ACCESS_VCS_PROJECT_DIR`** -- explicit override, set in the MCP `env` section if needed.
+2. **MCP workspace roots** -- when the client (Cursor, VS Code, Claude Code, etc.) supports `roots/list`, the server lazily discovers the workspace on the first tool call and loads `.env` from it. No configuration required.
+3. **Upward search from the working directory** -- works automatically when the IDE launches the server with the workspace as `cwd` (the typical case).
+4. **Upward search from the installed package location** -- last-resort fallback for development installs.
+
+`.env` files are also hot-reloaded: editing `.env` while the server is running causes the next tool call to pick up the new values, including `ACCESS_VCS_ENABLE_LOGGING`.
+
+The server prints diagnostics to stderr at startup (visible in Cursor's MCP server output pane) showing the resolved project root and which files were loaded -- check there first if a setting isn't taking effect.
 
 ## Available Tools
 

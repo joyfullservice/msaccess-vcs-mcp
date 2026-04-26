@@ -154,11 +154,23 @@ def _initialize_logging() -> bool:
         )
         _logging_enabled = True
 
+        # Include project-root resolution provenance so users can audit
+        # *how* the .env was discovered for this session (matters most
+        # when the server is launched at the user level and several
+        # discovery paths are possible).
+        try:
+            from .config import get_project_root_info
+            root_info = get_project_root_info()
+        except Exception:
+            root_info = {"project_root": None, "resolution_method": None}
+
         _write_log_entry({
             "event": "logging_initialized",
             "log_file": str(_log_file),
             "max_size_mb": config["max_size_mb"],
             "backup_count": config["backup_count"],
+            "project_root": root_info.get("project_root"),
+            "project_root_resolution": root_info.get("resolution_method"),
         })
 
         return True

@@ -75,6 +75,28 @@ contradictory guidance.
 
 ---
 
+## 2026-04-25 — Multi-strategy `.env` discovery with workspace-roots lazy init
+
+**Trigger**: A user reported that `ACCESS_VCS_ENABLE_LOGGING=true` in a client project's `.env` had no effect when `msaccess-vcs-mcp` was used from another project. Root cause: `_find_project_root()` only walked up from CWD or the installed package location. When the server was launched from a user-level `mcp.json` (`~/.cursor/mcp.json`) and CWD wasn't the project root, the upward walk failed, and the package-location fallback could match `msaccess-vcs-mcp`'s own `pyproject.toml` instead of the user's project. Compounding this, `_load_env_files()` always called `load_dotenv(..., override=False)`, so even a successful reload would silently fail to apply edited values. The sibling `db-inspector-mcp` project had already solved this with a layered resolution strategy.
+
+**Options explored**:
+- **Single env-var override (`ACCESS_VCS_PROJECT_DIR`) only**. Simple, works, but requires per-project user configuration. Doesn't help users who configure the server once at the user level and expect it to "just work" across projects.
+- **MCP workspace-roots discovery only** (`ctx.session.list_roots()`). Automatic, no user config required. But only works for tools that accept a `Context` parameter and run async — most existing tools are sync without `ctx`.
+- **Layered resolution: env-var → workspace roots → CWD walk → package walk → fallback (chosen)**. Mirrors `db-inspector-mcp`'s proven order. Each strategy compensates for the others' blind spots: explicit env-var for power users, workspace roots for IDE-launched servers, CWD walk for terminal-launched servers, package walk as a last-resort dev-install fallback.
+- **Eager workspace-roots probe at startup**. Cleaner than lazy init, but FastMCP's `Context` is not available before the first tool call -- the MCP protocol handshake hasn't completed yet.
+
+**Decision**: Ported `db-inspector-mcp`'s discovery machinery in full, with `ACCESS_VCS_` prefix substitution and three project-specific adaptations:
+
+1. **Resolution-method tracking**. `_find_project_root()` and `initialize_from_workspace()` set a module-level `_project_root_method` (one of `RESOLUTION_PROJECT_DIR_ENV`, `RESOLUTION_WORKSPACE_ROOTS`, `RESOLUTION_CWD_ENV`, `RESOLUTION_CWD_MARKER`, `RESOLUTION_PACKAGE_ENV`, `RESOLUTION_PACKAGE_MARKER`, `RESOLUTION_CWD_FALLBACK`). Surfaced via `get_project_root_info()`, printed to stderr ("Resolved project root: X (via Y)"), and embedded in the `logging_initialized` JSONL event so users can audit *which* mechanism actually populated their config in any given session.
+2. **mtime-based hot-reload with `override=True` on reload**. `_check_env_reload()` compares stored `.env`/`.env.local` mtimes against current values; when changed, the next `load_config()` triggers a reload using `override=True` so edited values actually replace old ones. Logging is reset only when a reload was detected (was previously reset on every `load_config()` call -- wasteful).
+3. **Lazy init wired through the `vcs_tool` decorator, not individual tools**. The decorator inspects the wrapped handler's signature; for async handlers that accept `ctx: Context`, it calls `await _ensure_env_loaded(ctx)` before `load_config()`. Converted `vcs_get_version_info`, `vcs_list_objects`, `vcs_diff_database`, `vcs_import_objects`, and `vcs_rebuild_database` to async with optional `ctx` so the workspace-roots path triggers on the agent's first realistic call regardless of which tool that is.
+
+**What this rules out**: Sync tools without `ctx` cannot trigger workspace-roots lazy init -- but this is fine because once any async-with-ctx tool runs, the project env is loaded for all subsequent calls (sync included). If a future agent goes straight to a sync tool first (e.g., `vcs_execute_sql` before any read tool), workspace-roots discovery won't fire and the user must rely on `ACCESS_VCS_PROJECT_DIR` or CWD-based discovery; converting more tools to async is the escape hatch. The `RESOLUTION_*` constants are part of an implicit public contract -- renaming them would silently break any log-analysis tooling that filters on `project_root_resolution`. The package-walk fallback can still match `msaccess-vcs-mcp`'s own dev tree when the CWD walk finds nothing; this is intentional for development installs and is the lowest-priority strategy.
+
+**Relevant files**: `src/msaccess_vcs_mcp/config.py` (resolution-method tracking, `_check_env_reload`, `_load_env_from_directory`, `initialize_from_workspace`, `get_project_root_info`), `src/msaccess_vcs_mcp/tools.py` (`_lazy_init_attempted`, `_file_uri_to_path`, `_ensure_env_loaded`, `vcs_tool` decorator, 5 tool signatures), `src/msaccess_vcs_mcp/usage_logging.py` (`logging_initialized` event includes `project_root` + `project_root_resolution`), `.env.example`, `README.md` (new "Using msaccess-vcs-mcp from Another Project" section), `tests/test_config_env_loading.py` (17 tests), `tests/test_lazy_workspace_init.py` (9 tests).
+
+---
+
 ## 2026-04-15 — Pre-execution audit logging for code execution tools
 
 **Trigger**: The existing usage logging captures tool parameters but truncates all strings to 500 characters and only writes after execution completes. For the three tools that execute arbitrary code against databases (`vcs_execute_sql`, `vcs_call_vba`, `vcs_run_vba`), this leaves two gaps: (1) a complex SQL query or VBA code block may be truncated beyond usefulness in a forensic review, and (2) if the process crashes during execution, no record of what was attempted exists.
@@ -127,6 +149,8 @@ contradictory guidance.
 ---
 
 ## 2026-04-15 — Structured JSONL usage logging via composite decorator
+
+> **⚠ Partially superseded** (2026-04-25): The "What this rules out" note about adopting `db-inspector-mcp`'s mtime-based hot-reload pattern "if performance becomes a concern" is now fact -- adopted for correctness rather than performance (the original `override=False` reload was silently failing to apply edits). The `logging_initialized` event also now includes `project_root` and `project_root_resolution` fields. See "Multi-strategy `.env` discovery with workspace-roots lazy init" above.
 
 **Trigger**: Need to troubleshoot and evaluate how AI agents use the MCP tools in practice — which tools are called, with what parameters, how often they fail, and how long they take. The `db-inspector-mcp` sibling project already has a proven logging implementation that was requested as the reference pattern.
 

@@ -30,15 +30,23 @@ import functools
 import inspect
 import json
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
 
 from .access_com.connection import AccessConnection
 from .access_com.dao_helpers import list_query_defs, list_table_defs
-from .config import get_config, get_callback_url, get_session_id, load_config
+from .config import (
+    get_config,
+    get_callback_url,
+    get_session_id,
+    initialize_from_workspace,
+    load_config,
+)
 from .addin_integration import VCSAddinIntegration
 from .security import (
     validate_database_path,
@@ -127,20 +135,101 @@ mcp = FastMCP(
 )
 
 
+# ---------------------------------------------------------------------------
+# Lazy .env discovery via MCP workspace roots
+# ---------------------------------------------------------------------------
+# When the server is configured at the *user* level (e.g. in
+# ~/.cursor/mcp.json) the working directory is typically the user's home
+# folder, not the project root. In that case the upward search in
+# ``config._find_project_root`` won't find the project's ``.env``. We use the
+# MCP ``roots/list`` call (available after the protocol handshake) to discover
+# the workspace and load its ``.env`` lazily on the first tool call.
+
+_lazy_init_attempted = False
+
+
+def _file_uri_to_path(uri: str) -> Path | None:
+    """Convert a ``file://`` URI to a local ``Path``, or return ``None``."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        return None
+    raw_path = unquote(parsed.path)
+    # On Windows, file:///C:/path -> /C:/path -- strip leading slash.
+    if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+        raw_path = raw_path[1:]
+    return Path(raw_path)
+
+
+async def _ensure_env_loaded(ctx: Context | None) -> None:
+    """Lazily load the project's ``.env`` from MCP workspace roots.
+
+    Only fires once per process. Skipped silently when ``ctx`` is None
+    (the tool was called without a Context) or when an ``.env`` was
+    already discovered at startup via CWD / ACCESS_VCS_PROJECT_DIR.
+    """
+    global _lazy_init_attempted
+    if _lazy_init_attempted or ctx is None:
+        return
+    _lazy_init_attempted = True
+
+    # If we already found a project .env at startup (CWD walk or
+    # ACCESS_VCS_PROJECT_DIR), don't override it with workspace discovery.
+    from .config import _get_project_root
+    startup_root = _get_project_root()
+    if (startup_root / ".env").exists():
+        return
+
+    try:
+        roots_result = await ctx.session.list_roots()
+    except Exception as exc:
+        print(
+            f"Could not request workspace roots from client: {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    for root in roots_result.roots:
+        workspace = _file_uri_to_path(str(root.uri))
+        if workspace is None:
+            continue
+        env_path = workspace / ".env"
+        if not env_path.exists():
+            continue
+        try:
+            initialize_from_workspace(workspace)
+            return
+        except Exception as exc:
+            print(
+                f"Failed to initialize from workspace {workspace}: {exc}",
+                file=sys.stderr,
+            )
+
+    print(
+        "No .env file found in any workspace root provided by the client.",
+        file=sys.stderr,
+    )
+
+
 def vcs_tool(name: str):
     """Register an MCP tool with config reload and usage logging.
 
-    Composes three concerns in the correct order so that every tool call:
-    1. Refreshes configuration from ``.env``.
-    2. Initializes or re-initializes usage logging with the current env vars.
-    3. Executes the tool body and logs the outcome.
+    Composes these concerns in the correct order so that every tool call:
+    1. Lazily discovers the project's ``.env`` via MCP workspace roots
+       (only on the first call, only when the wrapped handler accepts a
+       ``Context`` parameter).
+    2. Refreshes configuration from ``.env``.
+    3. Initializes or re-initializes usage logging with the current env vars.
+    4. Executes the tool body and logs the outcome.
     """
     def decorator(func):
         logged = with_logging(name)(func)
+        accepts_ctx = "ctx" in inspect.signature(func).parameters
 
         if inspect.iscoroutinefunction(func):
             @functools.wraps(func)
             async def with_refresh(*args, **kwargs):
+                if accepts_ctx:
+                    await _ensure_env_loaded(kwargs.get("ctx"))
                 load_config()
                 return await logged(*args, **kwargs)
         else:
@@ -348,7 +437,10 @@ async def vcs_export_database(
 
 
 @vcs_tool("vcs_list_objects")
-def vcs_list_objects(database_path: str) -> dict[str, Any]:
+async def vcs_list_objects(
+    database_path: str,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
     """
     List all objects in an Access database.
     
@@ -420,10 +512,11 @@ def vcs_list_objects(database_path: str) -> dict[str, Any]:
 
 
 @vcs_tool("vcs_diff_database")
-def vcs_diff_database(
+async def vcs_diff_database(
     database_path: str,
     source_dir: str,
-    show_details: bool = False
+    show_details: bool = False,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Compare database objects against source files.
@@ -511,7 +604,8 @@ async def vcs_import_objects(
     database_path: str,
     source_dir: str,
     object_types: list[str] | None = None,
-    overwrite: bool = False
+    overwrite: bool = False,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Import objects from source files into Access database.
@@ -670,7 +764,8 @@ async def vcs_import_objects(
 async def vcs_rebuild_database(
     source_dir: str,
     output_path: str,
-    template_path: str | None = None
+    template_path: str | None = None,
+    ctx: Context | None = None,
 ) -> dict[str, Any]:
     """
     Build a complete Access database from source files.
@@ -833,7 +928,9 @@ async def vcs_rebuild_database(
 
 
 @vcs_tool("vcs_get_version_info")
-def vcs_get_version_info() -> dict[str, Any]:
+async def vcs_get_version_info(
+    ctx: Context | None = None,
+) -> dict[str, Any]:
     """
     Get version information for MCP server, MSAccess VCS add-in, and Access application.
     
