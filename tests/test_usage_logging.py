@@ -13,6 +13,7 @@ from msaccess_vcs_mcp.usage_logging import (
     reset_logging,
     log_tool_call,
     log_code_execution,
+    log_addin_probe,
     with_logging,
     is_logging_enabled,
     get_log_file_path,
@@ -513,4 +514,92 @@ class TestLogCodeExecution:
                 tool_name="vcs_execute_sql",
                 database_path="C:\\test.accdb",
                 code="SELECT 1",
+            )
+
+
+class TestLogAddinProbe:
+    """Tests for log_addin_probe() probe instrumentation logging."""
+
+    def test_logs_successful_probe(self, tmp_path):
+        """A successful probe is logged with success=True and timed_out=False."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_addin_probe(
+                addin_path="C:\\AppData\\MSAccessVCS\\Version Control.accda",
+                duration_ms=12.5,
+                success=True,
+                timed_out=False,
+                error=None,
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["event"] == "addin_probe"
+        assert entry["addin_path"].endswith("Version Control.accda")
+        assert entry["duration_ms"] == 12.5
+        assert entry["success"] is True
+        assert entry["timed_out"] is False
+        assert "error" not in entry
+
+    def test_logs_timeout_probe(self, tmp_path):
+        """A timed-out probe records timed_out=True and the error message."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_addin_probe(
+                addin_path="C:\\AppData\\MSAccessVCS\\Version Control.accda",
+                duration_ms=10000.0,
+                success=False,
+                timed_out=True,
+                error="VCS add-in probe timed out after 10.0s ...",
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["event"] == "addin_probe"
+        assert entry["success"] is False
+        assert entry["timed_out"] is True
+        assert "timed out" in entry["error"]
+        # Timeout should categorize cleanly so analytics queries can group it.
+        assert entry["error_pattern"] == "timeout"
+
+    def test_logs_failure_probe(self, tmp_path):
+        """A non-timeout failure records success=False, timed_out=False."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_addin_probe(
+                addin_path="C:\\bad\\addin.accda",
+                duration_ms=5.3,
+                success=False,
+                timed_out=False,
+                error="Failed to load VCS add-in: COM error",
+            )
+
+        lines = (log_dir / "usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["success"] is False
+        assert entry["timed_out"] is False
+        assert "COM error" in entry["error"]
+
+    def test_noop_when_disabled(self):
+        """No error when logging is disabled — call is silently skipped."""
+        with patch.dict(os.environ, {"ACCESS_VCS_ENABLE_LOGGING": "false"}, clear=False):
+            log_addin_probe(
+                addin_path="C:\\addin.accda",
+                duration_ms=1.0,
+                success=True,
             )

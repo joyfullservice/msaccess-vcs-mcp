@@ -92,7 +92,7 @@ def _cleanup_session() -> None:
         with AccessConnection(db_path) as conn:
             app, db = conn.connect()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=db_path)
             addin.call_sync("EndSession", session_id)
             print(f"Session {session_id}: overrides cleaned up", file=sys.stderr)
     except Exception as e:

@@ -7,14 +7,19 @@ rather than reimplementing them in Python.
 """
 
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 try:
+    import pythoncom
     import win32com.client
     COM_AVAILABLE = True
 except ImportError:
     COM_AVAILABLE = False
+
+from .usage_logging import log_addin_probe
 
 
 def get_access_info(app) -> dict[str, Any]:
@@ -68,6 +73,13 @@ class VCSAddinIntegration:
     - Parsing results from add-in operations
     """
     
+    # Class-level guard against zombie probe threads piling up if Access
+    # stops responding (VBA break mode, modal dialog, true hang).  Per-
+    # instance state would be useless: every tool call constructs a fresh
+    # VCSAddinIntegration, so a hung probe on one instance is invisible to
+    # the next instance unless we track it on the class.
+    _active_probe_thread: Optional[threading.Thread] = None
+    
     def __init__(self, addin_path: Optional[str] = None):
         """
         Initialize add-in integration.
@@ -105,23 +117,45 @@ class VCSAddinIntegration:
         """
         return os.path.isfile(self.addin_path)
     
-    def load_addin(self, app) -> bool:
+    def load_addin(self, app, db_path: Optional[str] = None) -> bool:
         """
         Verify add-in is accessible via the new API method.
         
-        Note: The add-in doesn't need to be explicitly "loaded" - Access will
-        load it automatically when we call Application.Run. However, the target
-        database must be open first.
+        Probes the add-in by calling ``GetVCSVersion`` through
+        ``Application.Run`` with a hard timeout, surfacing dialog-blocked,
+        VBA-break-mode, or hung Access instances as a clear lifecycle error
+        before any real work is dispatched.  Idempotent: a second call on
+        the same instance is a no-op once the probe has succeeded.
         
         Args:
-            app: Access Application COM object (with a database open)
-            
+            app: Access Application COM object (with a database open).
+            db_path: Optional path to the target database.  When provided,
+                two things change:
+                  * a fast ``os.path.isfile`` pre-flight catches stale or
+                    typo paths in ~1ms instead of burning the full timeout;
+                  * the worker thread re-acquires Access via the Running
+                    Object Table for proper cross-apartment timeout
+                    enforcement.  When ``None``, the worker falls back to
+                    sharing the main thread's ``app`` proxy (best-effort
+                    timeout).
+        
         Returns:
-            True if add-in can be called successfully
-            
+            True if add-in can be called successfully.
+        
         Raises:
-            RuntimeError: If add-in cannot be accessed
+            RuntimeError: If add-in cannot be accessed (missing file,
+                untrusted, missing database, dialog-blocked, etc.).
+            TimeoutError: If the probe exceeds
+                ``ACCESS_VCS_PROBE_TIMEOUT_SEC`` (default 10s) -- typically
+                because Access is in VBA break mode or has a modal dialog
+                open.
         """
+        # Idempotent: skip the probe if we've already loaded the add-in
+        # against this instance.  validate_components() and get_version_info
+        # both call load_addin and we don't want to double-pay.
+        if self._addin_loaded:
+            return True
+        
         if not self.verify_addin_exists():
             raise RuntimeError(
                 f"VCS add-in not found at: {self.addin_path}\n"
@@ -129,27 +163,206 @@ class VCSAddinIntegration:
                 f"Download from: https://github.com/joyfullservice/msaccess-vcs-integration/releases"
             )
         
+        # Pre-flight: fast file-existence check.  When db_path is provided,
+        # catching a missing/moved/typo path here in ~1ms avoids burning the
+        # full probe timeout in ROT lookup for a database that isn't there.
+        if db_path is not None and not os.path.isfile(db_path):
+            raise RuntimeError(
+                f"Database file not found at: {db_path}.  The Access "
+                f"instance may have closed it, the file was moved/deleted, "
+                f"or the path is incorrect."
+            )
+        
         try:
-            # Store app reference
-            self._app = app
-            
-            # Verify add-in is accessible using the new API method
-            # Format: app.Run("C:\Path\Version Control.API", "GetVCSVersion")
-            addin_lib_name = os.path.splitext(self.addin_path)[0]
-            api_function_name = f'{addin_lib_name}.API'
-            
-            # Try calling a simple function to verify the add-in works
-            # This will also load the add-in if it's not already loaded
-            app.Run(api_function_name, "GetVCSVersion")
-            
-            self._addin_loaded = True
-            return True
-            
+            timeout_sec = float(os.environ.get("ACCESS_VCS_PROBE_TIMEOUT_SEC", "10"))
+        except ValueError:
+            timeout_sec = 10.0
+        
+        probe_start = time.perf_counter()
+        probe_error: Optional[str] = None
+        timed_out = False
+        try:
+            self._probe_with_timeout(app, db_path, timeout_sec)
+        except TimeoutError as e:
+            timed_out = True
+            probe_error = str(e)
+            raise
+        except RuntimeError as e:
+            probe_error = str(e)
+            raise
         except Exception as e:
+            probe_error = str(e)
             raise RuntimeError(
                 f"Failed to load VCS add-in: {e}\n"
                 f"Ensure a database is open and the add-in is trusted by Access."
             )
+        finally:
+            duration_ms = round((time.perf_counter() - probe_start) * 1000, 2)
+            log_addin_probe(
+                addin_path=self.addin_path,
+                duration_ms=duration_ms,
+                success=probe_error is None,
+                timed_out=timed_out,
+                error=probe_error,
+            )
+        
+        self._app = app
+        self._addin_loaded = True
+        return True
+    
+    def _probe_with_timeout(self, app, db_path: Optional[str], timeout_sec: float) -> None:
+        """
+        Run ``GetVCSVersion`` in a daemon worker thread with a hard timeout.
+        
+        Adapted from db-inspector-mcp's ``_run_dao_with_timeout`` (see that
+        project's DECISIONS.md for the full rationale).  The short version:
+        Access COM has no native timeout knob, ``CoCancelCall`` requires
+        server-side cooperation Jet/ACE doesn't implement, and killing
+        ``MSACCESS.EXE`` would lose the user's unsaved work.  A daemon
+        thread + ``thread.join(timeout)`` is the only practical way to
+        recover responsiveness when Access is stuck.
+        
+        Raises:
+            TimeoutError: If the worker doesn't finish within ``timeout_sec``.
+            RuntimeError: If a previous probe is still pending, or if the
+                worker can't acquire an Access instance.
+        """
+        cls = type(self)
+        if cls._active_probe_thread is not None and cls._active_probe_thread.is_alive():
+            raise RuntimeError(
+                "A previous VCS add-in probe is still pending against Access. "
+                "This usually means Access is in VBA break mode or has an "
+                "open modal dialog.  Resume execution in the VBE, dismiss "
+                "any dialog, or restart Access, then retry."
+            )
+        
+        addin_path_abs = os.path.abspath(self.addin_path)
+        addin_lib_name = os.path.splitext(addin_path_abs)[0]
+        api_function_name = f'{addin_lib_name}.API'
+        
+        result_box: dict[str, Any] = {}
+        
+        def worker() -> None:
+            try:
+                pythoncom.CoInitialize()
+                try:
+                    # When db_path is known, re-acquire Access via the ROT
+                    # so the worker has its own apartment-local proxy --
+                    # sharing the main thread's STA proxy across apartments
+                    # either fails to marshal or serializes back to the main
+                    # thread (which defeats the timeout).  When db_path is
+                    # None we fall back to the main proxy: best-effort, the
+                    # timeout may not fire reliably but behavior is no
+                    # worse than before.
+                    worker_app = (
+                        self._find_access_in_rot(db_path) if db_path else app
+                    )
+                    if worker_app is None:
+                        raise RuntimeError(
+                            f"Cannot find Access instance for {db_path} "
+                            f"from worker thread.  The Access application "
+                            f"may have been closed."
+                        )
+                    worker_app.Run(api_function_name, "GetVCSVersion")
+                    result_box["ok"] = True
+                finally:
+                    try:
+                        pythoncom.CoUninitialize()
+                    except Exception:
+                        pass
+            except Exception as exc:
+                result_box["error"] = exc
+        
+        thread = threading.Thread(
+            target=worker, daemon=True, name="vcs-addin-probe"
+        )
+        cls._active_probe_thread = thread
+        thread.start()
+        thread.join(timeout=timeout_sec)
+        
+        if thread.is_alive():
+            # Leave _active_probe_thread set so the next call's guard
+            # detects the lingering worker and short-circuits with a clear
+            # message.  The thread is daemon, so it will be reaped on
+            # process exit if Access never responds.
+            raise TimeoutError(
+                f"VCS add-in probe timed out after {timeout_sec}s "
+                f"(no response from Access).  Access is likely in VBA "
+                f"break mode (check the VBE), blocked on a modal dialog, "
+                f"or hung.  The probe thread will complete naturally once "
+                f"Access responds -- no data was lost.  To recover, "
+                f"resume execution in the VBE, dismiss any dialog, or "
+                f"close and reopen the database."
+            )
+        
+        cls._active_probe_thread = None
+        
+        if "error" in result_box:
+            raise result_box["error"]
+    
+    @staticmethod
+    def _find_access_in_rot(db_path: str):
+        """
+        Find an Access instance in the Running Object Table that has
+        ``db_path`` open.
+        
+        Two-tier strategy lifted with light edits from db-inspector-mcp's
+        ``_find_existing_instance``:
+          * Tier 1 -- direct file moniker lookup (~1ms).  ``GetObject`` only
+            inspects the ROT; it does NOT fall through to moniker binding,
+            so there's no risk of triggering a file-open or password
+            dialog.
+          * Tier 2 -- enumerate all ROT entries, call ``CurrentDb`` on each
+            (~10-50ms).  Catches Access instances that opened the database
+            via ``OpenCurrentDatabase`` from a COM client and therefore
+            don't appear under a file moniker.  Non-Access entries fail
+            on ``CurrentDb`` and are silently skipped.
+        
+        Returns:
+            An Access Application COM object, or None if no match found.
+        """
+        try:
+            pythoncom.CreateBindCtx(0)
+            rot = pythoncom.GetRunningObjectTable(0)
+        except Exception:
+            return None
+        
+        # Tier 1: direct file moniker lookup
+        try:
+            moniker = pythoncom.CreateFileMoniker(os.path.abspath(db_path))
+            obj = rot.GetObject(moniker)
+            return win32com.client.Dispatch(
+                obj.QueryInterface(pythoncom.IID_IDispatch)
+            )
+        except Exception:
+            pass
+        
+        # Tier 2: enumerate ROT entries, check CurrentDb on each
+        try:
+            enum = rot.EnumRunning()
+            target = os.path.normpath(os.path.abspath(db_path)).lower()
+            while True:
+                monikers = enum.Next(1)
+                if not monikers:
+                    break
+                try:
+                    obj = rot.GetObject(monikers[0])
+                    dispatch = win32com.client.Dispatch(
+                        obj.QueryInterface(pythoncom.IID_IDispatch)
+                    )
+                    cdb = dispatch.CurrentDb()
+                    if cdb is not None:
+                        cdb_path = os.path.normpath(
+                            os.path.abspath(cdb.Name)
+                        ).lower()
+                        if cdb_path == target:
+                            return dispatch
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        
+        return None
     
     def _call_addin_function(self, function_name: str, *args) -> Any:
         """
@@ -546,12 +759,23 @@ class VCSAddinIntegration:
             "addin_path": self.addin_path,
         }
         
-        # Store app reference temporarily for this call
-        self._app = app
-        
-        # Get Access application info
+        # Get Access application info first -- this works even if the add-in
+        # itself is unhealthy, so callers always get at least the Access
+        # version/bitness fields.
         access_info = get_access_info(app)
         result.update(access_info)
+        
+        # Load the add-in via the lifecycle gate.  Idempotent: if a caller
+        # (e.g. validate_components) already loaded it, this is an early
+        # return.  db_path=None: get_version_info doesn't have the DB path
+        # in scope, so the probe falls back to the main thread's app proxy.
+        try:
+            self.load_addin(app)
+        except Exception as load_error:
+            result["vcs_version"] = None
+            result["vcs_error"] = f"Failed to load VCS add-in: {load_error}"
+            result["success"] = False
+            return result
         
         # Get VCS add-in version
         try:

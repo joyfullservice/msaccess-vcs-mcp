@@ -1,11 +1,28 @@
 """Tests for VCS add-in integration."""
 
 import os
+import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 import pytest
 
 from msaccess_vcs_mcp.addin_integration import VCSAddinIntegration
+
+
+@pytest.fixture(autouse=True)
+def _clear_active_probe_thread():
+    """
+    Reset the class-level probe-thread guard between tests.
+
+    A timeout test deliberately leaves a worker thread running (so the
+    next-call guard can detect it).  Without this fixture, the lingering
+    thread could leak into the next test and cause flaky guard-detection
+    failures.  Tests that *want* the guard to fire seed it explicitly.
+    """
+    VCSAddinIntegration._active_probe_thread = None
+    yield
+    VCSAddinIntegration._active_probe_thread = None
 
 
 class TestVCSAddinIntegration:
@@ -274,6 +291,112 @@ class TestVCSAddinIntegration:
         
         # Should handle the error gracefully
         assert result["found"] is False or "error" in result
+
+
+class TestLoadAddinProbeTimeout:
+    """Tests for the GetVCSVersion probe timeout in load_addin()."""
+
+    def test_load_addin_timeout(self, tmp_path, monkeypatch):
+        """A slow probe is killed by the configured timeout."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+
+        addin = VCSAddinIntegration(str(addin_file))
+        mock_app = Mock()
+        # Simulate Access being unresponsive (e.g. VBA break mode):
+        # the worker's app.Run sleeps well past the timeout.
+        mock_app.Run = Mock(side_effect=lambda *a, **kw: time.sleep(2))
+
+        # Force a tight timeout so the test runs quickly.
+        monkeypatch.setenv("ACCESS_VCS_PROBE_TIMEOUT_SEC", "0.1")
+
+        with pytest.raises(TimeoutError, match="VCS add-in probe timed out"):
+            addin.load_addin(mock_app, db_path=None)
+
+        assert addin._addin_loaded is False
+
+    def test_load_addin_active_worker_guard(self, tmp_path):
+        """A pending probe blocks a second concurrent probe with a clear error."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+
+        # Seed the class-level guard with a still-running daemon thread so
+        # the next load_addin() call's guard fires immediately.  This
+        # avoids racing two real probes.
+        stop_event = threading.Event()
+        holding = threading.Thread(target=stop_event.wait, daemon=True)
+        holding.start()
+
+        try:
+            VCSAddinIntegration._active_probe_thread = holding
+
+            addin = VCSAddinIntegration(str(addin_file))
+            mock_app = Mock()
+            mock_app.Run = Mock(return_value=None)
+
+            with pytest.raises(
+                RuntimeError,
+                match="previous VCS add-in probe is still pending",
+            ):
+                addin.load_addin(mock_app, db_path=None)
+
+            # The probe was never attempted -- the guard short-circuited.
+            mock_app.Run.assert_not_called()
+        finally:
+            stop_event.set()
+            holding.join(timeout=1)
+            VCSAddinIntegration._active_probe_thread = None
+
+    def test_load_addin_db_path_not_found(self, tmp_path):
+        """Pre-flight catches missing db_path before any COM activity."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+
+        addin = VCSAddinIntegration(str(addin_file))
+        mock_app = Mock()
+        mock_app.Run = Mock(return_value=None)
+
+        missing_db = str(tmp_path / "does_not_exist.accdb")
+
+        with pytest.raises(RuntimeError, match="Database file not found"):
+            addin.load_addin(mock_app, db_path=missing_db)
+
+        # The pre-flight should have short-circuited before any probe COM
+        # activity -- proves we aren't burning the timeout for stale paths.
+        mock_app.Run.assert_not_called()
+        assert addin._addin_loaded is False
+
+    def test_load_addin_idempotent(self, tmp_path):
+        """Second call to load_addin on the same instance skips the probe."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+
+        addin = VCSAddinIntegration(str(addin_file))
+        mock_app = Mock()
+        mock_app.Run = Mock(return_value=None)
+
+        addin.load_addin(mock_app, db_path=None)
+        addin.load_addin(mock_app, db_path=None)
+
+        # Probe ran exactly once -- the second call hit the early return.
+        mock_app.Run.assert_called_once()
+
+    def test_load_addin_invalid_timeout_falls_back_to_default(
+        self, tmp_path, monkeypatch
+    ):
+        """An unparseable ACCESS_VCS_PROBE_TIMEOUT_SEC falls back to 10s."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+
+        addin = VCSAddinIntegration(str(addin_file))
+        mock_app = Mock()
+        mock_app.Run = Mock(return_value=None)
+
+        monkeypatch.setenv("ACCESS_VCS_PROBE_TIMEOUT_SEC", "not-a-number")
+
+        # Should not raise -- the default 10s is plenty for the mock probe.
+        result = addin.load_addin(mock_app, db_path=None)
+        assert result is True
 
 
 if __name__ == "__main__":

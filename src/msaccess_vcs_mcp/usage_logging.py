@@ -505,6 +505,49 @@ def log_code_execution(
     })
 
 
+def log_addin_probe(
+    addin_path: str,
+    duration_ms: float,
+    success: bool,
+    timed_out: bool = False,
+    error: str | None = None,
+) -> None:
+    """
+    Log a single VCS add-in ``GetVCSVersion`` probe.
+
+    Each call to :meth:`VCSAddinIntegration.load_addin` performs a probe to
+    verify the add-in is healthy before any real work is dispatched.  This
+    helper records the probe's outcome -- duration, success, and whether
+    the hard timeout fired -- so the cumulative cost of probing every tool
+    call can be audited from the same ``usage.jsonl`` stream as
+    ``tool_call`` and ``code_execution`` events.
+
+    Args:
+        addin_path: Path to the ``.accda`` add-in being probed.
+        duration_ms: Wall-clock duration of the probe in milliseconds.
+        success: True if the probe completed without raising.
+        timed_out: True iff the hard timeout (``ACCESS_VCS_PROBE_TIMEOUT_SEC``)
+            fired -- distinguishes true hangs from generic COM errors.
+        error: Error message when ``success`` is False; otherwise ``None``.
+    """
+    if not _initialize_logging():
+        return
+
+    entry: dict[str, Any] = {
+        "event": "addin_probe",
+        "addin_path": addin_path,
+        "duration_ms": duration_ms,
+        "success": success,
+        "timed_out": timed_out,
+    }
+
+    if error:
+        entry["error"] = _truncate_string(error, max_length=500)
+        entry["error_pattern"] = _extract_error_pattern(error)
+
+    _write_log_entry(entry)
+
+
 def get_log_file_path() -> Path | None:
     """
     Get the current log file path.

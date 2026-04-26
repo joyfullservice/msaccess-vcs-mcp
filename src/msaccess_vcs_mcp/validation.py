@@ -248,11 +248,17 @@ def validate_components(load_addin: bool = True) -> dict[str, Any]:
                     )
                     return result
                 
-                # Now that we've verified the correct database is open, we can call the add-in function directly
-                # The add-in loads automatically when called via Application.Run
-                # No need for a separate "load" step
-                # Ensure add-in has app reference set
-                addin._app = app
+                # Now that we've verified the correct database is open, load
+                # the add-in via the lifecycle gate.  load_addin probes the
+                # add-in (with timeout) and sets _addin_loaded so subsequent
+                # internal calls don't re-probe.
+                try:
+                    addin.load_addin(app, db_path=target_db)
+                except Exception as load_error:
+                    result["warnings"].append(
+                        f"Cannot retrieve VCS version: add-in did not respond: {load_error}"
+                    )
+                    return result
                 version_info = addin.get_version_info(app)
                 
                 if version_info.get("vcs_version"):

@@ -316,13 +316,13 @@ async def vcs_export_database(
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
-            # Initialize add-in integration
+            # Initialize add-in integration; load_addin probes the add-in
+            # with a hard timeout, surfacing dialog-blocked / VBA-break /
+            # hung Access instances as a clear lifecycle error before any
+            # real work is dispatched.
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app  # Set app reference for add-in calls
-            
-            # Pre-flight check: verify add-in is responsive (not blocked by dialogs)
             try:
-                addin.call_sync("GetVCSVersion")
+                addin.load_addin(app, db_path=str(db_path))
             except Exception as e:
                 return {
                     "success": False,
@@ -658,13 +658,13 @@ async def vcs_import_objects(
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
-            # Initialize add-in integration
+            # Initialize add-in integration; load_addin probes the add-in
+            # with a hard timeout, surfacing dialog-blocked / VBA-break /
+            # hung Access instances as a clear lifecycle error before any
+            # real work is dispatched.
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app  # Set app reference for add-in calls
-            
-            # Pre-flight check: verify add-in is responsive (not blocked by dialogs)
             try:
-                addin.call_sync("GetVCSVersion")
+                addin.load_addin(app, db_path=str(db_path))
             except Exception as e:
                 return {
                     "success": False,
@@ -824,9 +824,11 @@ async def vcs_rebuild_database(
             app = gencache.EnsureDispatch("Access.Application")
             
             try:
-                # Initialize add-in integration
+                # Initialize add-in integration.  No db_path: rebuild creates
+                # the database from source, so nothing is open in Access yet.
+                # The probe falls back to the main thread's app proxy.
                 addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-                addin._app = app  # Set app reference for add-in calls
+                addin.load_addin(app, db_path=None)
                 
                 # Determine command
                 command = "BuildAs" if output_path else "Build"
@@ -1079,10 +1081,9 @@ def vcs_check_vba_compiled(database_path: str) -> dict[str, Any]:
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
-            # Initialize add-in integration
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app  # Set app reference for add-in calls
+            addin.load_addin(app, db_path=str(db_path))
             
             # Call IsVBACompiled API
             is_compiled = addin.call_sync("IsVBACompiled")
@@ -1141,10 +1142,9 @@ def vcs_compile_vba(
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
-            # Initialize add-in integration
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app  # Set app reference for add-in calls
+            addin.load_addin(app, db_path=str(db_path))
             
             # Call CompileVBA API with suppress_warnings parameter
             compile_result = addin.call_sync("CompileVBA", suppress_warnings)
@@ -1206,7 +1206,7 @@ def vcs_export_object(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("ExportObject", object_type, object_name)
             
@@ -1269,7 +1269,7 @@ def vcs_import_object(
             app, db = conn.connect()
             
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("ImportObject", object_type, object_name)
             
@@ -1323,7 +1323,7 @@ def vcs_execute_sql(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("ExecuteSQL", sql, max_rows)
             
@@ -1478,7 +1478,7 @@ def vcs_run_vba(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("RunVBA", code)
             
@@ -1539,7 +1539,7 @@ def vcs_set_option(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             # Register session so the add-in scopes the override file correctly
             session_id = get_session_id()
@@ -1592,7 +1592,7 @@ def vcs_get_option(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result = addin.call_sync("GetOption", option_name)
             
@@ -1645,7 +1645,7 @@ def vcs_get_log(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("GetLogContent", log_type)
             
@@ -1687,7 +1687,7 @@ def vcs_end_session(
             
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            addin._app = app
+            addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("EndSession", session_id)
             
