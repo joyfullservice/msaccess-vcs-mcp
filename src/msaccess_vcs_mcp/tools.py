@@ -108,6 +108,14 @@ mcp = FastMCP(
         "**Configuration:**\n"
         "Set ACCESS_VCS_DATABASE to your target database path.\n"
         "Set ACCESS_VCS_DISABLE_WRITES=true to prevent database modifications.\n\n"
+        "**Rebuilding the VCS add-in:**\n"
+        "The VCS add-in (`Version Control.accda`) itself cannot be rebuilt via MCP tools. "
+        "Rebuilding it requires all Access instances to be closed, which would also close "
+        "any database files the user currently has open. If you change add-in source files "
+        "(e.g. `clsQueryComposer.cls`), ask the user to rebuild the add-in manually -- they "
+        "must close every open Access window first, then run the add-in's own build "
+        "process. After the user confirms the rebuild is complete, you can re-run "
+        "verification steps (export/import/rebuild of target databases) through the MCP.\n\n"
         "**Usage logs:**\n"
         "When ACCESS_VCS_ENABLE_LOGGING=true is set in the project .env, all tool calls are "
         "logged to a JSON Lines file. The default location is "
@@ -1317,21 +1325,52 @@ def vcs_run_vba(
     **Requires McpAllowRunVBA option to be enabled** (default: off).
     The user must enable this manually in the VCS Options form.
     
-    The agent's code should set the function return value. Example:
+    The agent's code should set the function return value via the
+    MCP_TempFunction identifier. Example:
         Dim result As String
         result = CurrentDb.QueryDefs("qryCustomers").SQL
-        _MCP_TempFunction = result
+        MCP_TempFunction = result
+    
+    **Line-number debugging:**
+    The add-in auto-prepends sequential 1-based VBA line numbers to every
+    executable line in `code` before running it. When a runtime error fires
+    inside the wrapper, the response includes an `errorLine` field whose
+    value equals the 1-based line number within the `code` string you
+    submitted. The counter advances on every physical input line (blanks,
+    comments, and `_` continuations included) even though only executable
+    lines actually carry a number, so `errorLine: 7` means "line 7 of what
+    I sent" -- you can index into your own `code` directly.
+    
+    Default behavior is to capture the LAST runtime error (the wrapper uses
+    `On Error Resume Next` so all statements run). For a richer pattern that
+    collects every failing line in one round-trip, use an explicit handler:
+    
+        Dim col As New Collection
+        On Error GoTo H
+        CurrentDb.Execute "DELETE * FROM tblA"
+        CurrentDb.Execute "INSERT INTO tblB SELECT * FROM nope"
+        CurrentDb.Execute "UPDATE tblC SET x = 1"
+        MCP_TempFunction = "errors=" & col.Count
+        Exit Function
+        H: col.Add Erl & ": " & Err.Number & " " & Err.Description
+        Resume Next
+    
+    Each `Erl` value inside the handler is meaningful (and matches an
+    `errorLine` you would have seen) because the wrapper auto-numbered
+    every line for you.
     
     Examples:
-        vcs_run_vba("C:\\\\db.accdb", "_MCP_TempFunction = CurrentDb.TableDefs.Count")
-        vcs_run_vba("C:\\\\db.accdb", "Dim qd As DAO.QueryDef\\nSet qd = CurrentDb.QueryDefs(\\"qryTest\\")\\n_MCP_TempFunction = qd.SQL")
+        vcs_run_vba("C:\\\\db.accdb", "MCP_TempFunction = CurrentDb.TableDefs.Count")
+        vcs_run_vba("C:\\\\db.accdb", "Dim qd As DAO.QueryDef\\nSet qd = CurrentDb.QueryDefs(\\"qryTest\\")\\nMCP_TempFunction = qd.SQL")
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
         code: VBA code to execute (statements, not just an expression)
     
     Returns:
-        Dictionary with success, result, and any compile or runtime errors
+        Dictionary with `success`, `result`, and on failure `error`,
+        `errorNumber`, and `errorLine` (the 1-based line in `code` that
+        raised the captured error; omitted when not available).
     """
     try:
         db_path = validate_database_path(database_path)

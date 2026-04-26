@@ -447,7 +447,7 @@ class TestLogCodeExecution:
             vba_code = (
                 "Dim qd As DAO.QueryDef\n"
                 "Set qd = CurrentDb.QueryDefs(\"qryTest\")\n"
-                "_MCP_TempFunction = qd.SQL"
+                "MCP_TempFunction = qd.SQL"
             )
             log_code_execution(
                 tool_name="vcs_run_vba",

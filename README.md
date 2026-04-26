@@ -328,7 +328,7 @@ The add-in handles the full lifecycle: creates a temp module, wraps the code in 
 - `code`: VBA code block to execute
 
 ```python
-vcs_run_vba("C:\\db.accdb", "_MCP_TempFunction = CurrentDb.TableDefs.Count")
+vcs_run_vba("C:\\db.accdb", "MCP_TempFunction = CurrentDb.TableDefs.Count")
 ```
 
 ### VBA Compilation
