@@ -147,7 +147,7 @@ class VCSAddinIntegration:
             
         except Exception as e:
             raise RuntimeError(
-                f"Failed to call VCS add-in API: {e}\n"
+                f"Failed to load VCS add-in: {e}\n"
                 f"Ensure a database is open and the add-in is trusted by Access."
             )
     
@@ -168,18 +168,18 @@ class VCSAddinIntegration:
         Raises:
             RuntimeError: If call fails
         """
+        # Gate on add-in load state so callers get a clear lifecycle error
+        # instead of a downstream COM message.
+        if not self._addin_loaded or not self._app:
+            raise RuntimeError("VCS add-in not loaded. Call load_addin() first.")
+
         try:
             # New API format: Path without extension + ".API", then function name as first argument
             # Example: app.Run("C:\Path\Version Control.API", "GetVCSVersion")
-            # Ensure path is absolute and normalized
             addin_path_abs = os.path.abspath(self.addin_path)
             addin_lib_name = os.path.splitext(addin_path_abs)[0]
             api_function_name = f'{addin_lib_name}.API'
-            
-            # Ensure app reference is set
-            if not self._app:
-                raise RuntimeError("Access Application object not set. Call get_version_info() or set _app first.")
-            
+
             # Verify database is open (required for add-in to work)
             try:
                 current_db = self._app.CurrentDb()
@@ -190,58 +190,38 @@ class VCSAddinIntegration:
                 _ = current_db.Name
             except Exception as db_error:
                 raise RuntimeError(f"Cannot access current database: {db_error}. Ensure a database is open before calling add-in functions.")
-            
-            # Call API with function name as first argument, then any additional args
-            # Note: The path format should match exactly what works in VBA
-            # Example: "C:\Users\akw\AppData\Roaming\MSAccessVCS\Version Control.API"
-            # Note: With early binding (gencache.EnsureDispatch), Run returns a tuple
-            # where the first element is the actual result
+
+            # With early binding (gencache.EnsureDispatch), Run returns a tuple
+            # where the first element is the actual result.
             try:
                 if args:
                     result = self._app.Run(api_function_name, function_name, *args)
                 else:
                     result = self._app.Run(api_function_name, function_name)
-                # Handle tuple return from early-bound Run method
                 if isinstance(result, tuple) and len(result) > 0:
                     return result[0]
                 return result
             except Exception as run_error:
-                # First call may fail while loading/initializing the add-in
-                # Try calling a second time - the add-in should now be loaded
+                # First call may fail while Access is loading/initializing the
+                # add-in. Retry once -- the add-in should now be resident.
                 try:
                     if args:
                         result = self._app.Run(api_function_name, function_name, *args)
                     else:
                         result = self._app.Run(api_function_name, function_name)
-                    # Handle tuple return from early-bound Run method
                     if isinstance(result, tuple) and len(result) > 0:
                         return result[0]
                     return result
                 except Exception as second_run_error:
-                    # Fallback: if Application.Run fails from COM, try a local wrapper via Eval.
-                    # This requires a public function in the current database, e.g.:
-                    #   Public Function CallVcsApi(methodName As String) As Variant
-                    #       CallVcsApi = Application.Run("C:\Path\Version Control.API", methodName)
-                    #   End Function
-                    wrapper_name = os.environ.get("ACCESS_VCS_API_WRAPPER", "CallVcsApi")
-                    try:
-                        eval_expr = f'{wrapper_name}("{function_name}")'
-                        return self._app.Eval(eval_expr)
-                    except Exception as eval_error:
-                        # All attempts failed - provide detailed error information
-                        error_details = (
-                            f"Failed to call add-in function '{function_name}': {run_error}\n"
-                            f"Second attempt also failed: {second_run_error}\n"
-                            f"Wrapper Eval failed: {eval_error}\n"
-                            f"Wrapper name: {wrapper_name}\n"
-                            f"API path used: {api_function_name}\n"
-                            f"Add-in path: {self.addin_path}\n"
-                            f"Ensure a database is open and the add-in path is correct."
-                        )
-                        raise RuntimeError(error_details)
-            
+                    raise RuntimeError(
+                        f"Failed to call add-in function '{function_name}': {second_run_error}\n"
+                        f"First attempt error: {run_error}\n"
+                        f"API path used: {api_function_name}\n"
+                        f"Add-in path: {self.addin_path}\n"
+                        f"Ensure a database is open and the add-in path is correct."
+                    )
+
         except RuntimeError:
-            # Re-raise RuntimeErrors as-is (they already have good error messages)
             raise
         except Exception as e:
             raise RuntimeError(

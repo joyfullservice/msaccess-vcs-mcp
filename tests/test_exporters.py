@@ -1,8 +1,13 @@
-"""Tests for object exporters."""
+"""Tests for object exporters.
+
+Note: this project delegates all export/import operations to the
+MSAccess VCS add-in via COM (see ``addin_integration.py``); there is
+no in-process ``msaccess_vcs_mcp.exporters`` module to unit-test.
+The placeholders below mark where future integration tests against a
+live Access database would live.
+"""
 
 import pytest
-from pathlib import Path
-import tempfile
 
 
 @pytest.mark.integration
@@ -15,15 +20,3 @@ def test_query_exporter():
 def test_module_exporter():
     """Test module exporter (requires Access)."""
     pytest.skip("Integration test - requires Access database")
-
-
-def test_sanitize_filename():
-    """Test filename sanitization."""
-    from msaccess_vcs_mcp.exporters.query_exporter import QueryExporter
-    
-    exporter = QueryExporter()
-    
-    # Test various invalid characters
-    assert exporter._sanitize_filename("test:query") == "test_query"
-    assert exporter._sanitize_filename("test/query") == "test_query"
-    assert exporter._sanitize_filename("test<>query") == "test__query"

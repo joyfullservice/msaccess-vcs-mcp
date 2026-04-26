@@ -23,19 +23,21 @@ def validate_database_path(path: str) -> Path:
         ValueError: If path is invalid
     """
     db_path = Path(path).resolve()
-    
-    if not db_path.exists():
-        raise ValueError(f"Database not found: {path}")
-    
-    if not db_path.is_file():
-        raise ValueError(f"Path is not a file: {path}")
-    
+
+    # Validate extension format first so callers passing the wrong file type
+    # get an actionable error even when the file doesn't exist.
     valid_extensions = {".accdb", ".accda", ".mdb"}
     if db_path.suffix.lower() not in valid_extensions:
         raise ValueError(
             f"Invalid database extension: {db_path.suffix}. "
             f"Expected one of: {', '.join(valid_extensions)}"
         )
+
+    if not db_path.exists():
+        raise ValueError(f"Database not found: {path}")
+
+    if not db_path.is_file():
+        raise ValueError(f"Path is not a file: {path}")
     
     # Don't allow system directories
     system_dirs = {"C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)"}

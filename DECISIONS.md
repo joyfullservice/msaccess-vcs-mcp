@@ -75,6 +75,23 @@ contradictory guidance.
 
 ---
 
+## 2026-04-25 — Drop silent `Application.Eval` fallback in `_call_addin_function`
+
+**Trigger**: Investigating failing add-in integration tests surfaced a long-standing usability and troubleshooting problem: when `Application.Run("…\Version Control.API", funcName)` failed twice in a row, `_call_addin_function` would silently fall through to `self._app.Eval("CallVcsApi(\"" & funcName & "\")")`, using a hard-coded default wrapper name. In any environment where the user had not implemented a `CallVcsApi` VBA function in the open database, this branch would still succeed against unit-test mocks and against any COM object whose `Eval` happened to return a value, producing false-success results for `vcs_export_*` and friends. The original `Run` error was buried in a three-layer retry/fallback message that obscured root cause during troubleshooting.
+
+**Options explored**:
+- **Keep current behavior, update tests to mock `Eval` raising**. Lowest-friction, but bakes the silent-success failure mode into production indefinitely.
+- **Make the fallback opt-in via `ACCESS_VCS_API_WRAPPER`**. Removes the silent-success default but adds a configuration knob plus a code path almost no one will exercise; documenting *when* to set it requires explaining a real Access COM bug that most users will never hit.
+- **Remove the fallback entirely (chosen)**. Single behavioral contract: if `Application.Run` fails twice, a `RuntimeError` is raised with the underlying COM error verbatim. Simpler call graph, fewer places to look during incident triage.
+
+**Decision**: Removed the `Application.Eval` fallback and the `ACCESS_VCS_API_WRAPPER` env-var hook. The single `Run` retry is preserved -- it covers the documented Access first-call add-in load behavior -- but a second failure now surfaces directly as `RuntimeError("Failed to call add-in function '<name>': <error>")`. The decision was driven by simplification of code and of troubleshooting, not by performance or correctness in any narrow sense.
+
+**What this rules out**: The MCP server will no longer auto-recover from genuine `Application.Run`-from-COM bugs by routing through a per-database VBA wrapper. Users who actually need that workaround must reintroduce it deliberately -- ideally as an explicit opt-in setting with a clear error message when it isn't configured -- not as a hidden default. Re-adding any silent fallback that swallows a documented error path should be rejected on review.
+
+**Relevant files**: `src/msaccess_vcs_mcp/addin_integration.py` (`_call_addin_function`).
+
+---
+
 ## 2026-04-25 — Multi-strategy `.env` discovery with workspace-roots lazy init
 
 **Trigger**: A user reported that `ACCESS_VCS_ENABLE_LOGGING=true` in a client project's `.env` had no effect when `msaccess-vcs-mcp` was used from another project. Root cause: `_find_project_root()` only walked up from CWD or the installed package location. When the server was launched from a user-level `mcp.json` (`~/.cursor/mcp.json`) and CWD wasn't the project root, the upward walk failed, and the package-location fallback could match `msaccess-vcs-mcp`'s own `pyproject.toml` instead of the user's project. Compounding this, `_load_env_files()` always called `load_dotenv(..., override=False)`, so even a successful reload would silently fail to apply edited values. The sibling `db-inspector-mcp` project had already solved this with a layered resolution strategy.

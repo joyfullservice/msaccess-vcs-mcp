@@ -44,18 +44,18 @@ def test_validate_export_directory_system_denied():
 def test_check_write_permission_denied():
     """Test write permission check."""
     from msaccess_vcs_mcp.security import check_write_permission
-    
-    config = {"ACCESS_VCS_ALLOW_WRITES": "false"}
-    
-    with pytest.raises(PermissionError, match="not authorized"):
+
+    config = {"ACCESS_VCS_DISABLE_WRITES": True}
+
+    with pytest.raises(PermissionError, match="Write operations are disabled"):
         check_write_permission(config)
 
 
 def test_check_write_permission_allowed():
     """Test write permission when enabled."""
     from msaccess_vcs_mcp.security import check_write_permission
-    
-    config = {"ACCESS_VCS_ALLOW_WRITES": "true"}
-    
+
+    config = {"ACCESS_VCS_DISABLE_WRITES": False}
+
     # Should not raise
     check_write_permission(config)
