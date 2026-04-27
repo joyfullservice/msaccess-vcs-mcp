@@ -54,7 +54,7 @@ from .security import (
     validate_source_directory,
     check_write_permission,
 )
-from .usage_logging import log_code_execution, with_logging
+from .usage_logging import log_code_execution, log_diagnostic_event, with_logging
 
 
 def _get_operation_manager():
@@ -124,13 +124,21 @@ mcp = FastMCP(
         "must close every open Access window first, then run the add-in's own build "
         "process. After the user confirms the rebuild is complete, you can re-run "
         "verification steps (export/import/rebuild of target databases) through the MCP.\n\n"
-        "**Usage logs:**\n"
-        "When ACCESS_VCS_ENABLE_LOGGING=true is set in the project .env, all tool calls are "
-        "logged to a JSON Lines file. The default location is "
-        "`~/.msaccess-vcs-mcp/logs/usage.jsonl` (in the user's home directory). "
-        "Override with ACCESS_VCS_LOG_DIR. Each line is a JSON object with fields: "
-        "timestamp, event, tool, parameters, success, error, error_pattern, "
-        "execution_time_ms."
+        "**Logs:**\n"
+        "Two JSON Lines streams (both prefixed `vcs-mcp-` so they don't collide with "
+        "other tools' logs in a shared directory).\n"
+        "1. `vcs-mcp-diagnostic.jsonl` -- always-on lifecycle log "
+        "(server_start, startup_env_load, lazy_init_*). Lives at "
+        "`~/.msaccess-vcs-mcp/logs/`. Opt out with "
+        "ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true.\n"
+        "2. `vcs-mcp-usage.jsonl` -- tool-call audit + code-execution events. "
+        "Default-on; opt out with ACCESS_VCS_ENABLE_LOGGING=false. "
+        "SQL/VBA bodies are recorded as `code_length` only (full `code` "
+        "field requires ACCESS_VCS_LOG_CODE_CONTENT=true). Param keys "
+        "matching password/secret/token/api_key/connection_string are "
+        "auto-masked to `<redacted>`. Override location with "
+        "ACCESS_VCS_LOG_DIR. Call `vcs_get_version_info()` to discover "
+        "both active log paths."
     )
 )
 
@@ -144,8 +152,21 @@ mcp = FastMCP(
 # ``config._find_project_root`` won't find the project's ``.env``. We use the
 # MCP ``roots/list`` call (available after the protocol handshake) to discover
 # the workspace and load its ``.env`` lazily on the first tool call.
+#
+# The lazy-init handshake fires from inside ``vcs_tool``'s wrapper for
+# *every* registered tool -- sync or async, with or without a declared
+# ``ctx: Context`` parameter -- by retrieving the request context via
+# ``mcp.get_context()``. FastMCP sets the request contextvar before
+# dispatching any tool handler, so this works uniformly across the entire
+# tool surface.
 
 _lazy_init_attempted = False
+# Set after the first post-init "already_attempted" diagnostic is emitted.
+# Subsequent tool calls take the same fast path but skip the disk write so
+# we don't spam the diagnostic log once per tool invocation. The first
+# repeated call still emits an event (kept for test coverage and so an
+# operator can confirm the cache is working).
+_lazy_init_skip_logged = False
 
 
 def _file_uri_to_path(uri: str) -> Path | None:
@@ -160,33 +181,76 @@ def _file_uri_to_path(uri: str) -> Path | None:
     return Path(raw_path)
 
 
+def _resolve_session(ctx: Context | None):
+    """Return ``ctx.session`` or ``None`` if ctx isn't request-scoped.
+
+    ``Context.request_context`` raises ``ValueError`` ("Context is not
+    available outside of a request") when no request is active. That can
+    happen if ``mcp.get_context()`` is called outside an MCP request --
+    for example, during a unit test that calls a wrapper directly. We
+    treat that as "no session" and skip lazy init rather than crashing
+    the tool call.
+    """
+    if ctx is None:
+        return None
+    try:
+        return ctx.session
+    except (ValueError, LookupError, AttributeError):
+        return None
+
+
 async def _ensure_env_loaded(ctx: Context | None) -> None:
     """Lazily load the project's ``.env`` from MCP workspace roots.
 
-    Only fires once per process. Skipped silently when ``ctx`` is None
-    (the tool was called without a Context) or when an ``.env`` was
-    already discovered at startup via CWD / ACCESS_VCS_PROJECT_DIR.
+    Only fires once per process. Every branch emits a diagnostic event to
+    the always-on diagnostic stream so an operator can answer "why didn't
+    my .env get loaded?" without having to enable usage logging first
+    (which is exactly the case where ``.env`` may have been missed).
     """
-    global _lazy_init_attempted
-    if _lazy_init_attempted or ctx is None:
+    global _lazy_init_attempted, _lazy_init_skip_logged
+    if _lazy_init_attempted:
+        # Emit the skip once so tests / operators can verify the cache is
+        # functioning, then go silent for the lifetime of the process.
+        if not _lazy_init_skip_logged:
+            log_diagnostic_event("lazy_init_skipped", reason="already_attempted")
+            _lazy_init_skip_logged = True
+        return
+    session = _resolve_session(ctx)
+    if session is None:
+        # ctx may be present but lack a request-scoped session (e.g. unit
+        # tests calling the wrapper directly). Don't flip the flag -- a
+        # later real request can still retry.
+        if ctx is None:
+            log_diagnostic_event("lazy_init_skipped", reason="no_ctx")
+        else:
+            log_diagnostic_event("lazy_init_skipped", reason="no_session")
         return
     _lazy_init_attempted = True
 
-    # If we already found a project .env at startup (CWD walk or
-    # ACCESS_VCS_PROJECT_DIR), don't override it with workspace discovery.
     from .config import _get_project_root
     startup_root = _get_project_root()
-    if (startup_root / ".env").exists():
+    startup_has_env = (startup_root / ".env").exists()
+    log_diagnostic_event(
+        "lazy_init_started",
+        startup_root=str(startup_root),
+        startup_root_has_env=startup_has_env,
+    )
+    if startup_has_env:
+        log_diagnostic_event("lazy_init_skipped", reason="startup_env_present")
         return
 
     try:
-        roots_result = await ctx.session.list_roots()
+        roots_result = await session.list_roots()
     except Exception as exc:
-        print(
-            f"Could not request workspace roots from client: {exc}",
-            file=sys.stderr,
+        log_diagnostic_event(
+            "list_roots_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
         )
         return
+
+    root_uris = [str(r.uri) for r in roots_result.roots]
+    log_diagnostic_event("list_roots_response", roots=root_uris)
 
     for root in roots_result.roots:
         workspace = _file_uri_to_path(str(root.uri))
@@ -196,47 +260,66 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
         if not env_path.exists():
             continue
         try:
+            log_diagnostic_event(
+                "lazy_init_loaded",
+                workspace=str(workspace),
+                env_path=str(env_path),
+            )
             initialize_from_workspace(workspace)
             return
         except Exception as exc:
-            print(
-                f"Failed to initialize from workspace {workspace}: {exc}",
-                file=sys.stderr,
+            log_diagnostic_event(
+                "lazy_init_load_failed",
+                workspace=str(workspace),
+                error=str(exc),
+                error_type=type(exc).__name__,
             )
 
-    print(
-        "No .env file found in any workspace root provided by the client.",
-        file=sys.stderr,
-    )
+    log_diagnostic_event("lazy_init_no_env_in_roots", roots=root_uris)
 
 
 def vcs_tool(name: str):
-    """Register an MCP tool with config reload and usage logging.
+    """Register an MCP tool with lazy .env discovery, config reload, and logging.
 
     Composes these concerns in the correct order so that every tool call:
     1. Lazily discovers the project's ``.env`` via MCP workspace roots
-       (only on the first call, only when the wrapped handler accepts a
-       ``Context`` parameter).
-    2. Refreshes configuration from ``.env``.
+       (only on the first call). The discovery uses ``mcp.get_context()``
+       to access the active request session, so it works for *every*
+       registered tool -- sync or async, with or without an explicit
+       ``ctx: Context`` parameter. FastMCP sets the request contextvar
+       before dispatching the handler, so the session is always available
+       during tool execution.
+    2. Refreshes configuration from ``.env`` (picks up edits made while
+       the server is running).
     3. Initializes or re-initializes usage logging with the current env vars.
     4. Executes the tool body and logs the outcome.
+
+    The wrapper is *always* an async coroutine. FastMCP detects this via
+    ``inspect.iscoroutinefunction`` and awaits it correctly. Sync tool
+    bodies are still invoked synchronously inside the wrapper -- there is
+    no concurrency change relative to FastMCP's default sync handling.
     """
     def decorator(func):
         logged = with_logging(name)(func)
-        accepts_ctx = "ctx" in inspect.signature(func).parameters
+        is_async_body = inspect.iscoroutinefunction(func)
 
-        if inspect.iscoroutinefunction(func):
-            @functools.wraps(func)
-            async def with_refresh(*args, **kwargs):
-                if accepts_ctx:
-                    await _ensure_env_loaded(kwargs.get("ctx"))
-                load_config()
+        @functools.wraps(func)
+        async def with_refresh(*args, **kwargs):
+            # ``mcp.get_context()`` returns a Context bound to the active
+            # request even when the tool itself doesn't declare a ctx
+            # parameter -- the lowlevel server sets the contextvar before
+            # dispatching. Outside of a request this returns a Context
+            # whose ``session`` access raises; ``_ensure_env_loaded``
+            # handles that case via ``_resolve_session``.
+            try:
+                ctx = mcp.get_context()
+            except Exception:
+                ctx = None
+            await _ensure_env_loaded(ctx)
+            load_config()
+            if is_async_body:
                 return await logged(*args, **kwargs)
-        else:
-            @functools.wraps(func)
-            def with_refresh(*args, **kwargs):
-                load_config()
-                return logged(*args, **kwargs)
+            return logged(*args, **kwargs)
 
         return mcp.tool()(with_refresh)
     return decorator
@@ -961,25 +1044,44 @@ async def vcs_get_version_info(
         - addin_path: Path to the VCS add-in file
         - callback_url: URL for async callbacks (None if not available)
         - async_available: Boolean indicating if async operations are supported
+        - usage_log_path: Path to ``vcs-mcp-usage.jsonl`` (None if usage
+          logging is disabled)
+        - diagnostic_log_path: Path to ``vcs-mcp-diagnostic.jsonl`` (None
+          if the always-on diagnostic stream has been opted out)
+        - log_code_content: Boolean -- whether ``code_execution`` events
+          record the full SQL/VBA body or only ``code_length``
         - errors: List of validation errors
         - warnings: List of validation warnings
     """
+    from .usage_logging import (
+        get_diagnostic_log_path,
+        get_log_file_path,
+        is_diagnostic_logging_enabled,
+        is_logging_enabled,
+    )
     from .validation import get_version_info_safe
-    
+
     result = get_version_info_safe()
-    
-    # Add callback server status
+
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
-    
+
     result["callback_url"] = callback_url
     result["async_available"] = bool(callback_url and op_manager)
-    
+
+    usage_path = get_log_file_path() if is_logging_enabled() else None
+    diag_path = get_diagnostic_log_path() if is_diagnostic_logging_enabled() else None
+    result["usage_log_path"] = str(usage_path) if usage_path else None
+    result["diagnostic_log_path"] = str(diag_path) if diag_path else None
+    result["log_code_content"] = (
+        os.getenv("ACCESS_VCS_LOG_CODE_CONTENT", "false").lower() == "true"
+    )
+
     if not callback_url:
         result["warnings"] = result.get("warnings", []) + [
             "Callback server not running - async operations will fall back to sync mode"
         ]
-    
+
     return result
 
 

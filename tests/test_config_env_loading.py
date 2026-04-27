@@ -25,18 +25,31 @@ from msaccess_vcs_mcp.config import (
 
 @pytest.fixture(autouse=True)
 def _reset_config_state(monkeypatch):
-    """Clear cached env-load state and ACCESS_VCS_* env vars between tests."""
+    """Clear cached env-load state and ACCESS_VCS_* env vars between tests.
+
+    Also disables the always-on diagnostic stream so config-loading
+    tests don't write to the user's real ``~/.msaccess-vcs-mcp/logs/``
+    directory while exercising ``_load_env_files``.
+    """
+    import msaccess_vcs_mcp.usage_logging as logging_module
+
     config_module._env_loaded = False
     config_module._is_reload = False
     config_module._project_root = None
     config_module._project_root_method = None
     config_module._env_mtimes = {}
 
-    # Strip any ACCESS_VCS_* env vars so a real .env in the dev tree doesn't
-    # leak into the test environment.
+    logging_module._diagnostic_handler = None
+    logging_module._diagnostic_file = None
+    logging_module._diagnostic_initialized = False
+    logging_module._diagnostic_enabled = False
+    logging_module._diagnostic_disabled_reason = None
+
     for key in list(os.environ):
         if key.startswith("ACCESS_VCS_"):
             monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG", "true")
 
     yield
 
@@ -45,6 +58,12 @@ def _reset_config_state(monkeypatch):
     config_module._project_root = None
     config_module._project_root_method = None
     config_module._env_mtimes = {}
+
+    logging_module._diagnostic_handler = None
+    logging_module._diagnostic_file = None
+    logging_module._diagnostic_initialized = False
+    logging_module._diagnostic_enabled = False
+    logging_module._diagnostic_disabled_reason = None
 
 
 def _write_env(path: Path, contents: str) -> Path:
@@ -340,7 +359,7 @@ class TestResolutionRecordedInUsageLog:
 
             entries = [
                 json.loads(line)
-                for line in (log_dir / "usage.jsonl").read_text(encoding="utf-8").splitlines()
+                for line in (log_dir / "vcs-mcp-usage.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
             init_events = [e for e in entries if e.get("event") == "logging_initialized"]

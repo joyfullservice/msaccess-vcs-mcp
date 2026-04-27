@@ -5,8 +5,11 @@ import atexit
 import os
 import sys
 import uuid
+from pathlib import Path
 
+from . import __version__
 from .config import get_config, validate_access_installation
+from .usage_logging import log_diagnostic_event
 
 
 # Global reference to callback server for cleanup
@@ -101,6 +104,16 @@ def _cleanup_session() -> None:
 
 def main() -> None:
     """Main entry point for the MCP server."""
+    # Always-on lifecycle event: emitted before .env discovery so we still
+    # have a record even when the project root cannot be resolved.
+    log_diagnostic_event(
+        "server_start",
+        cwd=str(Path.cwd()),
+        project_dir_env=os.getenv("ACCESS_VCS_PROJECT_DIR"),
+        mcp_version=__version__,
+        session_id=_session_id,
+    )
+
     # Load configuration (.env files from project root)
     config = get_config()
     
@@ -171,12 +184,32 @@ def main() -> None:
     print(f"Session ID: {_session_id}", file=sys.stderr)
     
     # Show logging status
-    from .usage_logging import is_logging_enabled, get_log_file_path
-    if is_logging_enabled():
-        print(f"Usage logging: {get_log_file_path()}", file=sys.stderr)
+    from .usage_logging import (
+        get_diagnostic_log_path,
+        get_log_file_path,
+        is_diagnostic_logging_enabled,
+        is_logging_enabled,
+    )
+    usage_enabled = is_logging_enabled()
+    usage_path = get_log_file_path() if usage_enabled else None
+    if usage_enabled:
+        print(f"Usage logging: {usage_path}", file=sys.stderr)
     else:
-        print("Usage logging: disabled", file=sys.stderr)
-    
+        print("Usage logging: disabled (set ACCESS_VCS_ENABLE_LOGGING=true to enable)", file=sys.stderr)
+
+    # Diagnostic stream is always-on by default; surface it so the operator
+    # knows where to look when usage logging is silent.
+    if is_diagnostic_logging_enabled():
+        print(f"Diagnostic logging: {get_diagnostic_log_path()}", file=sys.stderr)
+    else:
+        print("Diagnostic logging: disabled", file=sys.stderr)
+
+    log_diagnostic_event(
+        "usage_log_status",
+        enabled=usage_enabled,
+        log_file=str(usage_path) if usage_path else None,
+    )
+
     # Import and run MCP server
     from .tools import mcp
     mcp.run(transport="stdio")

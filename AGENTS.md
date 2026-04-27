@@ -88,21 +88,38 @@ Key variables:
 - `ACCESS_VCS_DISABLE_WRITES` — set `true` to block write operations
 - `ACCESS_VCS_ENABLE_LOGGING` — set `true` to enable usage logging
 
-## Usage Logging
+## Logging
 
-When `ACCESS_VCS_ENABLE_LOGGING=true`, every tool call is logged to a JSON Lines file for analytics and debugging.
+The server writes two parallel JSON Lines streams. Both filenames use the `vcs-mcp-` prefix so they don't collide with other tools that share the same logs directory.
 
-- **Development installs:** logs to `{project_root}/logs/usage.jsonl`
-- **Package installs:** logs to `~/.msaccess-vcs-mcp/logs/usage.jsonl`
-- Override with `ACCESS_VCS_LOG_DIR`
+### Diagnostic stream (`vcs-mcp-diagnostic.jsonl`) — always on
 
-Each log entry includes: `timestamp`, `version`, `event`, `tool`, `parameters`, `success`, `error`, `error_pattern`, `execution_time_ms`.
+Captures server lifecycle events: `server_start`, `startup_env_load`, `lazy_env_load`, `lazy_init_started`, `lazy_init_skipped`, `list_roots_failed`, `list_roots_response`, `lazy_init_loaded`, `lazy_init_no_env_in_roots`, `usage_log_status`. Independent of `ACCESS_VCS_ENABLE_LOGGING` so it answers the "why didn't logging work?" question even when usage logging is silent.
 
-### Code Execution Audit Trail
+- **Location:** `~/.msaccess-vcs-mcp/logs/vcs-mcp-diagnostic.jsonl`
+- **Override:** `ACCESS_VCS_DIAGNOSTIC_LOG_DIR`
+- **Opt out:** `ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true`
+- **Rotation:** 1 MB per file, 3 backups
+- **Discoverable from agents:** `vcs_get_version_info()` returns the active `diagnostic_log_path`.
 
-Tools that execute arbitrary code (`vcs_execute_sql`, `vcs_call_vba`, `vcs_run_vba`) write an additional `"code_execution"` event **before** execution begins. This entry preserves the full SQL/VBA text without truncation — critical for forensic review if an agent does something destructive. Fields: `event`, `tool`, `database`, `code_type` (`"sql"`, `"vba"`, `"vba_call"`), `code`.
+### Usage stream (`vcs-mcp-usage.jsonl`) — default on
 
-Rotation is automatic (`ACCESS_VCS_LOG_MAX_SIZE_MB`, default 10 MB; `ACCESS_VCS_LOG_BACKUP_COUNT`, default 5).
+When `ACCESS_VCS_ENABLE_LOGGING=true` (the default), every tool call writes a structured entry. Set the env var to `false` to opt out.
+
+- **Development installs:** logs to `{project_root}/logs/vcs-mcp-usage.jsonl`
+- **Package installs:** logs to `~/.msaccess-vcs-mcp/logs/vcs-mcp-usage.jsonl`
+- **Override:** `ACCESS_VCS_LOG_DIR`
+- **Rotation:** `ACCESS_VCS_LOG_MAX_SIZE_MB` (default 10 MB), `ACCESS_VCS_LOG_BACKUP_COUNT` (default 5)
+
+Each `tool_call` entry includes: `timestamp`, `version`, `event`, `tool`, `parameters`, `success`, `error`, `error_pattern`, `execution_time_ms`.
+
+### Tiered audit posture
+
+Three sensitivity tiers in the usage stream, each independently controlled:
+
+1. **Audit metadata** — always written when `ENABLE_LOGGING=true`. Tool name, timing, success/error, sanitized parameter dict.
+2. **Code-execution bodies** — `vcs_execute_sql`, `vcs_call_vba`, and `vcs_run_vba` write a `"code_execution"` event *before* execution begins. By default only `code_length` is recorded. Set `ACCESS_VCS_LOG_CODE_CONTENT=true` to record the full `code` field for forensic replay (off by default to limit business-data exposure). `code_length` lets analysts spot anomalies (e.g. "an agent ran a 4 KB VBA block") without seeing the body.
+3. **Credential-shaped parameter keys** — any parameter whose name matches `password`, `secret`, `token`, `api_key`, `apikey`, `connection_string`, or `connectionstring` (case-insensitive) is replaced with `"<redacted>"` regardless of other switches. Defense in depth.
 
 ## Adding a New Tool
 

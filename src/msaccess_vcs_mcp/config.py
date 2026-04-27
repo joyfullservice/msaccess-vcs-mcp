@@ -6,6 +6,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from .usage_logging import log_diagnostic_event
+
 
 # Resolution-method labels emitted by ``_find_project_root`` and
 # ``initialize_from_workspace``. Surfaced via ``get_project_root_info()``
@@ -230,6 +232,15 @@ def _load_env_files() -> None:
 
     _record_env_mtimes()
 
+    log_diagnostic_event(
+        "startup_env_load",
+        project_root=str(project_root),
+        resolution_method=_project_root_method,
+        env_loaded=env_path.exists(),
+        env_local_loaded=env_local_path.exists(),
+        reload=reloading,
+    )
+
 
 def _load_env_from_directory(directory: Path) -> bool:
     """Load .env and .env.local from an explicit directory.
@@ -264,6 +275,13 @@ def _load_env_from_directory(directory: Path) -> bool:
         loaded = True
 
     _record_env_mtimes()
+
+    log_diagnostic_event(
+        "lazy_env_load",
+        workspace=str(directory.resolve()),
+        env_loaded=env_path.exists(),
+        env_local_loaded=env_local_path.exists(),
+    )
     return loaded
 
 
@@ -378,10 +396,14 @@ def load_config() -> dict[str, Any]:
         "ACCESS_VCS_CALLBACK_HOST": os.getenv("ACCESS_VCS_CALLBACK_HOST", "127.0.0.1"),
 
         # Logging configuration
-        "ACCESS_VCS_ENABLE_LOGGING": os.getenv("ACCESS_VCS_ENABLE_LOGGING", "false").lower() == "true",
+        # ACCESS_VCS_ENABLE_LOGGING defaults to true (audit-by-default).
+        # Sensitive content (SQL/VBA bodies, credential-shaped params) is
+        # still redacted unless ACCESS_VCS_LOG_CODE_CONTENT=true.
+        "ACCESS_VCS_ENABLE_LOGGING": os.getenv("ACCESS_VCS_ENABLE_LOGGING", "true").lower() == "true",
         "ACCESS_VCS_LOG_DIR": os.getenv("ACCESS_VCS_LOG_DIR", ""),
         "ACCESS_VCS_LOG_MAX_SIZE_MB": int(os.getenv("ACCESS_VCS_LOG_MAX_SIZE_MB", "10")),
         "ACCESS_VCS_LOG_BACKUP_COUNT": int(os.getenv("ACCESS_VCS_LOG_BACKUP_COUNT", "5")),
+        "ACCESS_VCS_LOG_CODE_CONTENT": os.getenv("ACCESS_VCS_LOG_CODE_CONTENT", "false").lower() == "true",
 
         # Runtime values (set by main.py after callback server starts)
         # ACCESS_VCS_CALLBACK_URL - set in environment after server starts
