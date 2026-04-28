@@ -325,6 +325,52 @@ class TestProjectRootResolutionMethod:
         assert info["project_root"] == str(explicit.resolve())
 
 
+class TestQuotedPathsInEnv:
+    """Paths with optional quotes are normalised by load_config."""
+
+    def test_double_quoted_database_path(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        project.mkdir()
+        _write_env(project, 'ACCESS_VCS_DATABASE="C:\\Repos\\db.accdb"\n')
+        monkeypatch.chdir(project)
+
+        config = load_config()
+        assert config["ACCESS_VCS_DATABASE"] == "C:\\Repos\\db.accdb"
+
+    def test_single_quoted_database_path(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        project.mkdir()
+        _write_env(project, "ACCESS_VCS_DATABASE='C:\\Repos\\db.accdb'\n")
+        monkeypatch.chdir(project)
+
+        config = load_config()
+        assert config["ACCESS_VCS_DATABASE"] == "C:\\Repos\\db.accdb"
+
+    def test_unquoted_database_path_unchanged(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        project.mkdir()
+        _write_env(project, "ACCESS_VCS_DATABASE=C:\\Repos\\db.accdb\n")
+        monkeypatch.chdir(project)
+
+        config = load_config()
+        assert config["ACCESS_VCS_DATABASE"] == "C:\\Repos\\db.accdb"
+
+    def test_quoted_project_dir(self, tmp_path, monkeypatch):
+        """ACCESS_VCS_PROJECT_DIR with quotes is resolved correctly."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        _write_env(project, "X=1\n")
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        monkeypatch.setenv("ACCESS_VCS_PROJECT_DIR", f'"{project}"')
+
+        result = _find_project_root()
+        assert result == project.resolve()
+
+
 class TestResolutionRecordedInUsageLog:
     """The logging_initialized event must capture project-root provenance."""
 

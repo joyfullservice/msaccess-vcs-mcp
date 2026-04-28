@@ -54,6 +54,13 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable
 
+def _strip_path_quotes(value: str) -> str:
+    """Strip matching outer quotes from an env-var value (see config._strip_quotes)."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 _logging_enabled: bool | None = None
 _log_handler: RotatingFileHandler | None = None
 _log_file: Path | None = None
@@ -177,7 +184,7 @@ def _get_logging_config() -> dict[str, Any]:
     """Load logging configuration from environment variables."""
     return {
         "enabled": os.getenv("ACCESS_VCS_ENABLE_LOGGING", "true").lower() == "true",
-        "log_dir": os.getenv("ACCESS_VCS_LOG_DIR", ""),
+        "log_dir": _strip_path_quotes(os.getenv("ACCESS_VCS_LOG_DIR", "")),
         "max_size_mb": int(os.getenv("ACCESS_VCS_LOG_MAX_SIZE_MB", "10")),
         "backup_count": int(os.getenv("ACCESS_VCS_LOG_BACKUP_COUNT", "5")),
         "log_code_content": os.getenv("ACCESS_VCS_LOG_CODE_CONTENT", "false").lower() == "true",
@@ -193,7 +200,7 @@ def _get_diagnostic_log_dir() -> Path:
     discovered (which is the exact scenario the diagnostic stream is
     designed to debug). Override with ``ACCESS_VCS_DIAGNOSTIC_LOG_DIR``.
     """
-    override = os.getenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", "").strip()
+    override = _strip_path_quotes(os.getenv("ACCESS_VCS_DIAGNOSTIC_LOG_DIR", "")).strip()
     if override:
         return Path(override)
     return Path.home() / ".msaccess-vcs-mcp" / "logs"

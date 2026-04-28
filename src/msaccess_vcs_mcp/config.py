@@ -9,6 +9,20 @@ from dotenv import load_dotenv
 from .usage_logging import log_diagnostic_event
 
 
+def _strip_quotes(value: str) -> str:
+    """Strip matching outer quotes from a value.
+
+    Handles single and double quotes so that paths like
+    ``"C:\\Repos\\My Database.accdb"`` or ``'C:\\Repos\\My Database.accdb'``
+    are normalised regardless of whether the value came from python-dotenv
+    (which already strips quotes) or from a source that preserves them
+    literally (mcp.json env section, system environment variables).
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 # Resolution-method labels emitted by ``_find_project_root`` and
 # ``initialize_from_workspace``. Surfaced via ``get_project_root_info()``
 # so usage logging and stderr diagnostics can show *how* the project root
@@ -56,7 +70,7 @@ def _find_project_root() -> Path:
     import sys
 
     # 1. Explicit override via ACCESS_VCS_PROJECT_DIR
-    explicit_dir = os.getenv("ACCESS_VCS_PROJECT_DIR")
+    explicit_dir = _strip_quotes(os.getenv("ACCESS_VCS_PROJECT_DIR", ""))
     if explicit_dir:
         explicit_path = Path(explicit_dir).resolve()
         if explicit_path.is_dir():
@@ -387,8 +401,8 @@ def load_config() -> dict[str, Any]:
 
     config = {
         # Database settings
-        "ACCESS_VCS_DATABASE": os.getenv("ACCESS_VCS_DATABASE", ""),
-        "ACCESS_VCS_ADDIN_PATH": os.getenv("ACCESS_VCS_ADDIN_PATH", get_default_addin_path()),
+        "ACCESS_VCS_DATABASE": _strip_quotes(os.getenv("ACCESS_VCS_DATABASE", "")),
+        "ACCESS_VCS_ADDIN_PATH": _strip_quotes(os.getenv("ACCESS_VCS_ADDIN_PATH", get_default_addin_path())),
         "ACCESS_VCS_DISABLE_WRITES": os.getenv("ACCESS_VCS_DISABLE_WRITES", "false").lower() == "true",
 
         # Callback server settings
@@ -400,7 +414,7 @@ def load_config() -> dict[str, Any]:
         # Sensitive content (SQL/VBA bodies, credential-shaped params) is
         # still redacted unless ACCESS_VCS_LOG_CODE_CONTENT=true.
         "ACCESS_VCS_ENABLE_LOGGING": os.getenv("ACCESS_VCS_ENABLE_LOGGING", "true").lower() == "true",
-        "ACCESS_VCS_LOG_DIR": os.getenv("ACCESS_VCS_LOG_DIR", ""),
+        "ACCESS_VCS_LOG_DIR": _strip_quotes(os.getenv("ACCESS_VCS_LOG_DIR", "")),
         "ACCESS_VCS_LOG_MAX_SIZE_MB": int(os.getenv("ACCESS_VCS_LOG_MAX_SIZE_MB", "10")),
         "ACCESS_VCS_LOG_BACKUP_COUNT": int(os.getenv("ACCESS_VCS_LOG_BACKUP_COUNT", "5")),
         "ACCESS_VCS_LOG_CODE_CONTENT": os.getenv("ACCESS_VCS_LOG_CODE_CONTENT", "false").lower() == "true",
