@@ -903,6 +903,104 @@ class TestSecretKeyMasking:
         assert "sk-abc123" not in raw
 
 
+class TestCodeParameterRedaction:
+    """Tests for code-body redaction in tool_call parameter logging.
+
+    The ``code_execution`` event correctly honours ``LOG_CODE_CONTENT``,
+    but the ``tool_call`` event's parameter dict would previously leak
+    the code body through keys like ``code`` and ``sql``. These tests
+    verify that both events now behave consistently.
+    """
+
+    def test_default_redacts_code_param(self):
+        """With LOG_CODE_CONTENT unset (default false), the ``code``
+        parameter is replaced with a length stub."""
+        result = _sanitize_parameters({"code": "MsgBox \"hello\""})
+        assert result["code"] == "<code_length:14>"
+
+    def test_default_redacts_sql_param(self):
+        """The ``sql`` parameter is also treated as executable content."""
+        sql = "SELECT * FROM Customers"
+        result = _sanitize_parameters({"sql": sql})
+        assert result["sql"] == f"<code_length:{len(sql)}>"
+
+    def test_opt_in_preserves_code_param(self):
+        """With LOG_CODE_CONTENT=true, code passes through (truncated
+        at the normal string limit like any other parameter)."""
+        code = "MsgBox \"hello\""
+        with patch.dict(os.environ, {"ACCESS_VCS_LOG_CODE_CONTENT": "true"}, clear=False):
+            result = _sanitize_parameters({"code": code})
+        assert result["code"] == code
+
+    def test_opt_in_preserves_sql_param(self):
+        sql = "SELECT * FROM Customers"
+        with patch.dict(os.environ, {"ACCESS_VCS_LOG_CODE_CONTENT": "true"}, clear=False):
+            result = _sanitize_parameters({"sql": sql})
+        assert result["sql"] == sql
+
+    def test_non_code_keys_unaffected(self):
+        """Keys that aren't ``code`` or ``sql`` pass through normally."""
+        params = {"database_path": "C:\\db.accdb", "option_name": "ShowDebug"}
+        result = _sanitize_parameters(params)
+        assert result == params
+
+    def test_end_to_end_tool_call_redacts_code(self, tmp_path):
+        """End-to-end: log_tool_call replaces the code body with a
+        length stub when LOG_CODE_CONTENT is false."""
+        log_dir = tmp_path / "logs"
+        vba = "Dim x As Long\nx = 42\nMCP_TempFunction = x"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            os.environ.pop("ACCESS_VCS_LOG_CODE_CONTENT", None)
+            _initialize_logging()
+            log_tool_call(
+                tool_name="vcs_run_vba",
+                parameters={
+                    "database_path": "C:\\test.accdb",
+                    "code": vba,
+                },
+                execution_time_ms=100.0,
+            )
+
+        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["parameters"]["code"] == f"<code_length:{len(vba)}>"
+        assert entry["parameters"]["database_path"] == "C:\\test.accdb"
+        raw = lines[-1]
+        assert "MCP_TempFunction" not in raw
+
+    def test_end_to_end_tool_call_preserves_code_when_opted_in(self, tmp_path):
+        """When LOG_CODE_CONTENT=true, the code body appears in the
+        tool_call parameters (subject to normal truncation)."""
+        log_dir = tmp_path / "logs"
+        vba = "MCP_TempFunction = 42"
+        with patch.dict(
+            os.environ,
+            {
+                "ACCESS_VCS_ENABLE_LOGGING": "true",
+                "ACCESS_VCS_LOG_DIR": str(log_dir),
+                "ACCESS_VCS_LOG_CODE_CONTENT": "true",
+            },
+            clear=False,
+        ):
+            _initialize_logging()
+            log_tool_call(
+                tool_name="vcs_run_vba",
+                parameters={
+                    "database_path": "C:\\test.accdb",
+                    "code": vba,
+                },
+                execution_time_ms=50.0,
+            )
+
+        lines = (log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")
+        entry = json.loads(lines[-1])
+        assert entry["parameters"]["code"] == vba
+
+
 class TestDefaultLogDirResolution:
     """Tests for ``_get_default_log_dir`` workspace-aware resolution.
 

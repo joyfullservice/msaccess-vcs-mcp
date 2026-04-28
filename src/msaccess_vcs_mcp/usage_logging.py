@@ -515,6 +515,15 @@ _SECRET_KEY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Parameter keys that carry executable code (SQL, VBA).  When
+# ``ACCESS_VCS_LOG_CODE_CONTENT`` is false (the default), these are
+# replaced with ``"<code_length:N>"`` so the audit trail records
+# *that* code was passed and how large it was, without persisting
+# the body.  This closes the gap where ``code_execution`` events
+# correctly honour the switch but ``tool_call`` events would leak
+# the code through the parameter dict.
+_CODE_KEY_PATTERN = re.compile(r"^(code|sql)$", re.IGNORECASE)
+
 
 def _sanitize_parameters(params: dict[str, Any], max_string_length: int = 500) -> dict[str, Any]:
     """Sanitize parameters for logging.
@@ -524,11 +533,23 @@ def _sanitize_parameters(params: dict[str, Any], max_string_length: int = 500) -
     - Caps lists at 10 items.
     - Replaces values whose keys match :data:`_SECRET_KEY_PATTERN` with
       ``"<redacted>"`` so credential-shaped fields never reach disk.
+    - Replaces values whose keys match :data:`_CODE_KEY_PATTERN` with
+      a length stub when ``ACCESS_VCS_LOG_CODE_CONTENT`` is disabled,
+      matching the behaviour of ``code_execution`` events.
     """
+    log_code = _get_logging_config()["log_code_content"]
     sanitized: dict[str, Any] = {}
     for key, value in params.items():
         if isinstance(key, str) and _SECRET_KEY_PATTERN.search(key):
             sanitized[key] = "<redacted>"
+            continue
+        if (
+            not log_code
+            and isinstance(key, str)
+            and _CODE_KEY_PATTERN.search(key)
+            and isinstance(value, str)
+        ):
+            sanitized[key] = f"<code_length:{len(value)}>"
             continue
         if isinstance(value, str):
             sanitized[key] = _truncate_string(value, max_string_length)
