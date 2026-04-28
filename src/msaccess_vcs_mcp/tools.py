@@ -895,79 +895,59 @@ async def vcs_rebuild_database(
             if busy_error:
                 return busy_error
         
-        # Note: We need Access to be running to call the add-in,
-        # but we don't have a database open yet. The add-in's build
-        # process will create the database.
+        # We need Access running to call the add-in, but no database is
+        # open yet -- the add-in's build process creates it.  Create a
+        # bare Access instance (no AccessConnection, which requires a
+        # database path) and manage its lifecycle with try/finally.
+        from win32com.client import gencache
+        app = gencache.EnsureDispatch("Access.Application")
         
-        # Create a temporary Access instance just to load the add-in
-        with AccessConnection.__new__(AccessConnection) as conn:
-            # Create Access app without opening a database
-            # Use EnsureDispatch for early binding (fixes Application.Run issues)
-            from win32com.client import gencache
-            app = gencache.EnsureDispatch("Access.Application")
+        try:
+            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
+            addin.load_addin(app, db_path=None)
             
-            try:
-                # Initialize add-in integration.  No db_path: rebuild creates
-                # the database from source, so nothing is open in Access yet.
-                # The probe falls back to the main thread's app proxy.
-                addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-                addin.load_addin(app, db_path=None)
+            # Determine command
+            command = "BuildAs" if output_path else "Build"
+            
+            # Check if async build is available
+            if callback_url and op_manager:
+                # Ensure operation manager uses the correct event loop (FastMCP's loop)
+                op_manager.set_event_loop(asyncio.get_running_loop())
                 
-                # Determine command
-                command = "BuildAs" if output_path else "Build"
+                # Use async path with progress callbacks
+                operation_id, queue = op_manager.register_operation(
+                    database_path=output_path or str(src_path),
+                    command=command
+                )
+                callback_info = op_manager.create_callback_info(
+                    operation_id, callback_url, "cursor"
+                )
                 
-                # Check if async build is available
-                if callback_url and op_manager:
-                    # Ensure operation manager uses the correct event loop (FastMCP's loop)
-                    op_manager.set_event_loop(asyncio.get_running_loop())
+                try:
+                    completion = None
+                    if command == "Build":
+                        async_result = addin.call_async(callback_info, command, str(src_path))
+                    else:
+                        async_result = addin.call_async(callback_info, command)
                     
-                    # Use async path with progress callbacks
-                    operation_id, queue = op_manager.register_operation(
-                        database_path=output_path or str(src_path),
-                        command=command
-                    )
-                    callback_info = op_manager.create_callback_info(
-                        operation_id, callback_url, "cursor"
-                    )
-                    
-                    try:
-                        # Call async API for Build
-                        # Build takes optional source folder, BuildAs does not
-                        completion = None
-                        if command == "Build":
-                            async_result = addin.call_async(callback_info, command, str(src_path))
-                        else:
-                            async_result = addin.call_async(callback_info, command)
+                    if async_result.get("async"):
+                        timeout_ms = async_result.get("timeout_ms", 600000)  # 10 min for builds
+                        completion = await op_manager.wait_for_completion(
+                            operation_id,
+                            ctx=None,
+                            timeout_seconds=timeout_ms / 1000
+                        )
                         
-                        if async_result.get("async"):
-                            # Wait for completion with progress reporting
-                            timeout_ms = async_result.get("timeout_ms", 600000)  # 10 min for builds
-                            completion = await op_manager.wait_for_completion(
-                                operation_id,
-                                ctx=None,
-                                timeout_seconds=timeout_ms / 1000
-                            )
-                            
-                            if not completion.get("success"):
-                                return {
-                                    "success": False,
-                                    "error": completion.get("error", "Build failed"),
-                                    "output_path": None,
-                                }
-                    except Exception as e:
-                        # Async call failed - fall back to sync
-                        completion = None
-                        op_manager.unregister_operation(operation_id)
-                        result = addin.build_from_source(str(src_path), output_path)
-                        if not result["success"]:
+                        if not completion.get("success"):
                             return {
                                 "success": False,
-                                "error": result["message"],
+                                "error": completion.get("error", "Build failed"),
                                 "output_path": None,
                             }
-                else:
-                    # Use sync path
+                except Exception as e:
+                    # Async call failed - fall back to sync
                     completion = None
+                    op_manager.unregister_operation(operation_id)
                     result = addin.build_from_source(str(src_path), output_path)
                     if not result["success"]:
                         return {
@@ -975,28 +955,37 @@ async def vcs_rebuild_database(
                             "error": result["message"],
                             "output_path": None,
                         }
-                
-                # Get log path from callback result, or use legacy path as fallback
-                log_path = None
-                if completion:
-                    log_path = completion.get("log_path")
-                if not log_path:
-                    legacy_path = os.path.join(str(src_path), "Build.log")
-                    if os.path.exists(legacy_path):
-                        log_path = legacy_path
-                
-                return {
-                    "success": True,
-                    "output_path": output_path,
-                    "source_dir": str(src_path),
-                    "log_path": log_path if (log_path and os.path.exists(log_path)) else None,
-                }
-            finally:
-                # Clean up Access instance
-                try:
-                    app.Quit()
-                except Exception:
-                    pass
+            else:
+                # Use sync path
+                completion = None
+                result = addin.build_from_source(str(src_path), output_path)
+                if not result["success"]:
+                    return {
+                        "success": False,
+                        "error": result["message"],
+                        "output_path": None,
+                    }
+            
+            # Get log path from callback result, or use legacy path as fallback
+            log_path = None
+            if completion:
+                log_path = completion.get("log_path")
+            if not log_path:
+                legacy_path = os.path.join(str(src_path), "Build.log")
+                if os.path.exists(legacy_path):
+                    log_path = legacy_path
+            
+            return {
+                "success": True,
+                "output_path": output_path,
+                "source_dir": str(src_path),
+                "log_path": log_path if (log_path and os.path.exists(log_path)) else None,
+            }
+        finally:
+            try:
+                app.Quit()
+            except Exception:
+                pass
     
     except PermissionError as e:
         return {
