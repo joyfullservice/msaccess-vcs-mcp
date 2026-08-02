@@ -1,0 +1,2 @@
+# uv always writes the lockfile with LF; pin it so autocrlf doesn't cause churn.
+uv.lock text eol=lf
