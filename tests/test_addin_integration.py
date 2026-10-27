@@ -202,6 +202,43 @@ class TestVCSAddinIntegration:
         assert result["success"] is False
         assert "Export failed" in result["message"]
     
+    @pytest.mark.parametrize("returned, succeeds", [
+        (True, True),
+        (None, True),  # older add-in builds return nothing
+        (False, False),
+        ("VCS_API_REFUSED: another API command is still running.", False),
+    ])
+    def test_export_source_reads_the_return_value(self, tmp_path, returned, succeeds):
+        """Export returns False when it did not run to the end, or a refusal string."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+        
+        addin = VCSAddinIntegration(str(addin_file))
+        addin._app = Mock()
+        addin._app.Run = Mock(return_value=returned)
+        addin._addin_loaded = True
+        
+        result = addin.export_source(str(tmp_path / "test.accdb"))
+        
+        assert result["success"] is succeeds
+        if returned and not succeeds:
+            assert "another API command is still running" in result["message"]
+    
+    def test_export_vba_reports_a_stopped_export(self, tmp_path):
+        """ExportVBA returning False is a failure, not a success."""
+        addin_file = tmp_path / "test_addin.accda"
+        addin_file.touch()
+        
+        addin = VCSAddinIntegration(str(addin_file))
+        addin._app = Mock()
+        addin._app.Run = Mock(return_value=False)
+        addin._addin_loaded = True
+        
+        result = addin.export_vba(str(tmp_path / "test.accdb"))
+        
+        assert result["success"] is False
+        assert "did not complete" in result["message"]
+    
     def test_export_vba(self, tmp_path):
         """Test VBA-only export."""
         addin_file = tmp_path / "test_addin.accda"

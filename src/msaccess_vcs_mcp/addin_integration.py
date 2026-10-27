@@ -22,6 +22,28 @@ except ImportError:
 from .usage_logging import log_addin_probe
 
 
+# Prefix the add-in puts on a refused (re-entrant) call. It returns a marked string
+# instead of raising because an error raised inside a library database does not
+# propagate across Application.Run -- it opens a modal dialog and blocks Access.
+# Keep in sync with modAPI.API_REFUSED_PREFIX.
+API_REFUSED_PREFIX = "VCS_API_REFUSED: "
+
+
+def _export_failure(result: Any) -> Optional[str]:
+    """
+    Return why an Export, FullExport, or ExportVBA call did not run, or None.
+
+    These return False for an export that was refused, stopped by a check (a newer
+    add-in version in the project's options, a locked project), or failed. Older
+    add-in builds return nothing, which is not a failure.
+    """
+    if result is False:
+        return "the add-in reported that the export did not complete; see the Export log"
+    if isinstance(result, str) and result.startswith(API_REFUSED_PREFIX):
+        return result[len(API_REFUSED_PREFIX):]
+    return None
+
+
 def get_access_info(app) -> dict[str, Any]:
     """
     Get Access application version and bitness.
@@ -509,10 +531,18 @@ class VCSAddinIntegration:
         try:
             # Call VCS API directly (Export or FullExport based on flag)
             command = "FullExport" if full_export else "Export"
-            self._call_addin_function(command)
+            failure = _export_failure(self._call_addin_function(command))
             
             # Check for log file to confirm export completed
             log_path = os.path.join(export_path, "Export.log")
+            
+            if failure:
+                return {
+                    "success": False,
+                    "export_path": export_path,
+                    "log_path": log_path if os.path.exists(log_path) else None,
+                    "message": f"Export failed: {failure}"
+                }
             
             return {
                 "success": True,
@@ -546,9 +576,17 @@ class VCSAddinIntegration:
         export_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            self._call_addin_function("ExportVBA")
+            failure = _export_failure(self._call_addin_function("ExportVBA"))
             
             log_path = os.path.join(export_path, "Export.log")
+            
+            if failure:
+                return {
+                    "success": False,
+                    "export_path": export_path,
+                    "log_path": log_path if os.path.exists(log_path) else None,
+                    "message": f"VBA export failed: {failure}"
+                }
             
             return {
                 "success": True,

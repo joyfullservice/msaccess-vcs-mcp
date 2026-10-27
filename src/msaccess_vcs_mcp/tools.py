@@ -58,7 +58,7 @@ from .config import (
     initialize_from_workspace,
     load_config,
 )
-from .addin_integration import VCSAddinIntegration
+from .addin_integration import API_REFUSED_PREFIX as _API_REFUSED_PREFIX, VCSAddinIntegration
 from .security import (
     validate_database_path,
     validate_export_directory,
@@ -2392,12 +2392,6 @@ def _execute_call_vba(
 # form never works and the project-name form works only sometimes. Rewriting to the
 # configured full path is correct from a cold start and loads the add-in on demand.
 _ADDIN_QUALIFIER_ALIASES = frozenset({"vcs", "version control", "msaccessvcs"})
-
-# Prefix the add-in puts on a refused (re-entrant) call. It returns a marked string
-# instead of raising because an error raised inside a library database does not
-# propagate across Application.Run -- it opens a modal dialog and blocks Access.
-# Keep in sync with modAPI.API_REFUSED_PREFIX.
-_API_REFUSED_PREFIX = "VCS_API_REFUSED: "
 
 def _resolve_addin_function_name(function_name: str) -> str:
     """Rewrite a VCS add-in alias qualifier to the configured add-in's full path."""
