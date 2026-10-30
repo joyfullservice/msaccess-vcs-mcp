@@ -121,6 +121,31 @@ def _log_server_shutdown() -> None:
     log_diagnostic_event("server_shutdown", session_id=_session_id)
 
 
+def _configure_sse(mcp, host: str, port: int) -> None:
+    """Point the SSE transport at host:port.
+
+    FastMCP.run() takes no host or port (mcp 1.28 to 1.30): they are settings. The
+    server object is built for 127.0.0.1, which also turns on the Host header check
+    for localhost only, so a client on another machine would be refused. The check
+    stays on, with the one address listened on allowed as well.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    named = f"[{host}]" if ":" in host else host  # an IPv6 address is bracketed in a URL
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[f"{named}:*", "127.0.0.1:*", "localhost:*", "[::1]:*"],
+        allowed_origins=[
+            f"http://{named}:*",
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+        ],
+    )
+
+
 def main() -> None:
     """Main entry point for the MCP server."""
     # Always-on lifecycle event: emitted before .env discovery so we still
@@ -261,9 +286,17 @@ def main() -> None:
     import argparse
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"])
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args, _ = parser.parse_known_args()
+
+    if args.transport == "sse" and args.host in ("0.0.0.0", "::"):
+        print(
+            "--host must be one address of this machine (for example its address on "
+            "the network the client is on), not all of them",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     # Import and run MCP server
     from .tools import mcp
@@ -271,8 +304,9 @@ def main() -> None:
     log_diagnostic_event(f"{transport_label}_start", session_id=_session_id)
     try:
         if args.transport == "sse":
+            _configure_sse(mcp, args.host, args.port)
             print(f"Starting SSE server on {args.host}:{args.port}", file=sys.stderr)
-            mcp.run(transport="sse", host=args.host, port=args.port)
+            mcp.run(transport="sse")
         else:
             mcp.run(transport="stdio")
         log_diagnostic_event(f"{transport_label}_returned", session_id=_session_id)
