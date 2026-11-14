@@ -929,9 +929,13 @@ async def vcs_list_objects(
         - tables: List of table names
         - queries: List of query names with types
         - modules: List of module names
-        - forms: List of form names (future)
-        - reports: List of report names (future)
-        - macros: List of macro names (future)
+        - forms: List of form names, sorted by name
+        - reports: List of report names, sorted by name
+        - macros: List of standalone macro names, sorted by name (not
+          macros embedded in forms or reports, nor table data macros)
+
+        If forms, reports or macros cannot be read, ``success`` is False
+        and ``error`` names the collection.
     """
     try:
         # Validate path
@@ -959,15 +963,39 @@ async def vcs_list_objects(
             except Exception as e:
                 print(f"Warning: Could not list modules: {e}")
             
+            # List forms, reports and macros. CurrentProject's All* collections
+            # hold AccessObject entries, so reading names opens nothing.
+            # Access's own order is not stable, so sort by name.
+            object_names = {}
+            for key, collection in (
+                ("forms", "AllForms"),
+                ("reports", "AllReports"),
+                ("macros", "AllMacros"),
+            ):
+                try:
+                    object_names[key] = sorted(
+                        (obj.Name for obj in getattr(app.CurrentProject, collection)),
+                        key=str.casefold,
+                    )
+                except Exception as e:
+                    return {
+                        "success": False,
+                        "error": f"Could not list {key} (CurrentProject.{collection}): {e}",
+                        "database": str(db_path),
+                        "tables": table_names,
+                        "queries": queries,
+                        "modules": module_names,
+                    }
+
             return {
                 "success": True,
                 "database": str(db_path),
                 "tables": table_names,
                 "queries": queries,
                 "modules": module_names,
-                "forms": [],  # Future implementation
-                "reports": [],  # Future implementation
-                "macros": [],  # Future implementation
+                "forms": object_names["forms"],
+                "reports": object_names["reports"],
+                "macros": object_names["macros"],
             }
     
     except Exception as e:

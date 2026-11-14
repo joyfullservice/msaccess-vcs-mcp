@@ -225,7 +225,7 @@ List all objects in an Access database by type.
 **Args:**
 - `database_path`: Path to Access database
 
-**Returns:** `tables`, `queries`, `modules` (and `forms`, `reports` in future)
+**Returns:** `tables`, `queries`, `modules`, `forms`, `reports`, `macros` (standalone macros only)
 
 ```python
 vcs_list_objects("C:\\db.accdb")
