@@ -49,6 +49,7 @@ from .access_com.connection import (
     ensure_dispatch,
 )
 from .access_com.dao_helpers import list_query_defs, list_table_defs
+from .access_com.instance_registry import paths_match
 from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
 from .access_gate import EXEMPT_TOOLS, get_access_gate
 from .config import (
@@ -906,6 +907,24 @@ async def vcs_export_database(
         }
 
 
+def _current_vb_project(app):
+    """Return the VBA project of the database open in ``app``, or None.
+
+    Matched on file name rather than ``VBE.ActiveVBProject``, which is
+    whichever project the VBE last activated and can be the add-in's once
+    the add-in has been loaded.
+    """
+    db_file = app.CurrentProject.FullName
+    for project in app.VBE.VBProjects:
+        try:
+            file_name = project.FileName
+        except Exception:
+            continue
+        if paths_match(file_name, db_file):
+            return project
+    return None
+
+
 @vcs_tool("vcs_list_objects")
 async def vcs_list_objects(
     database_path: str,
@@ -951,8 +970,19 @@ async def vcs_list_objects(
             # List modules
             module_names = []
             try:
-                vbe = app.VBE
-                vb_project = vbe.ActiveVBProject
+                vb_project = _current_vb_project(app)
+                if vb_project is None:
+                    return {
+                        "success": False,
+                        "error": (
+                            "Could not find this database's VBA project in "
+                            "VBE.VBProjects; modules were not listed."
+                        ),
+                        "database": str(db_path),
+                        "tables": table_names,
+                        "queries": queries,
+                        "modules": [],
+                    }
                 for component in vb_project.VBComponents:
                     if component.Type in (1, 2):  # Standard and class modules
                         module_names.append(component.Name)
