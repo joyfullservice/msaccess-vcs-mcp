@@ -9,12 +9,25 @@ utilities for waiting on operation completion with progress reporting.
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# How long an abandoned operation keeps answering "cancelled" to the add-in's poll
+# when no terminal callback arrives to close it sooner.
+TOMBSTONE_TTL_SECONDS = 600.0
+
+TERMINAL_CALLBACK_TYPES = frozenset({"complete", "error", "cancelled"})
+
+
+def normalize_database_path(database_path: str) -> str:
+    """Key a database path so spelling, case, and relative form all match."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(database_path)))
 
 
 class MonotonicProgressReporter:
@@ -141,6 +154,10 @@ class OperationManager:
         """Initialize the operation manager."""
         self._operations: dict[str, PendingOperation] = {}
         self._database_operations: dict[str, str] = {}  # database_path -> operation_id
+        # operation_id -> monotonic expiry. An operation nobody waits for any more is
+        # still running in Access; its id stays cancelled here until Access reports
+        # back or the TTL passes, so the add-in's poll can stop it.
+        self._tombstones: dict[str, float] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
     
     @classmethod
@@ -186,8 +203,7 @@ class OperationManager:
         
         # Track by database path for concurrency control
         if database_path:
-            normalized_path = database_path.lower().replace("/", "\\")
-            self._database_operations[normalized_path] = operation_id
+            self._database_operations[normalize_database_path(database_path)] = operation_id
         
         logger.debug(f"Registered operation {operation_id} for {database_path or 'unknown'}")
         
@@ -204,12 +220,50 @@ class OperationManager:
         if operation:
             # Clean up database tracking
             if operation.database_path:
-                normalized_path = operation.database_path.lower().replace("/", "\\")
+                normalized_path = normalize_database_path(operation.database_path)
                 if self._database_operations.get(normalized_path) == operation_id:
                     del self._database_operations[normalized_path]
             
             del self._operations[operation_id]
             logger.debug(f"Unregistered operation {operation_id}")
+
+    def abandon_operation(self, operation_id: str) -> None:
+        """
+        Stop tracking an operation nobody is waiting for, and ask Access to stop it.
+
+        Called when a wait times out or the client gives up. The operation is still
+        running in Access, so its id is kept as a tombstone that keeps answering
+        "cancelled" to the add-in's poll.
+        """
+        if operation_id not in self._operations:
+            return
+        self._operations[operation_id].cancelled = True
+        self._tombstones[operation_id] = time.monotonic() + TOMBSTONE_TTL_SECONDS
+        self.unregister_operation(operation_id)
+        logger.info(f"Abandoned operation {operation_id}; cancellation requested")
+
+    def _tombstone_is_live(self, operation_id: str) -> bool:
+        expiry = self._tombstones.get(operation_id)
+        if expiry is None:
+            return False
+        if time.monotonic() >= expiry:
+            self._tombstones.pop(operation_id, None)
+            return False
+        return True
+
+    def list_active_operations(self) -> list[dict[str, Any]]:
+        """Describe every operation a tool is still waiting on."""
+        return [
+            {
+                "operation_id": op.operation_id,
+                "command": op.command,
+                "database_path": op.database_path,
+                "started_at": op.started_at.isoformat(),
+                "elapsed_seconds": round(op.elapsed_seconds, 1),
+                "cancelled": op.cancelled,
+            }
+            for op in list(self._operations.values())
+        ]
     
     def route_callback(self, operation_id: str, data: dict) -> bool:
         """
@@ -227,6 +281,11 @@ class OperationManager:
         """
         operation = self._operations.get(operation_id)
         if not operation:
+            if operation_id in self._tombstones:
+                # The abandoned operation has finished; stop answering "cancelled".
+                if data.get("type") in TERMINAL_CALLBACK_TYPES:
+                    self._tombstones.pop(operation_id, None)
+                return False
             logger.warning(f"Callback for unknown operation: {operation_id}")
             return False
         
@@ -262,8 +321,7 @@ class OperationManager:
         Returns:
             The active PendingOperation, or None if no operation is running
         """
-        normalized_path = database_path.lower().replace("/", "\\")
-        operation_id = self._database_operations.get(normalized_path)
+        operation_id = self._database_operations.get(normalize_database_path(database_path))
         if operation_id:
             return self._operations.get(operation_id)
         return None
@@ -317,8 +375,8 @@ class OperationManager:
         operation = self._operations.get(operation_id)
         if operation:
             return operation.cancelled
-        # Unknown operations are not considered cancelled
-        return False
+        # An abandoned operation stays cancelled; unknown ones never were.
+        return self._tombstone_is_live(operation_id)
     
     def request_cancel(self, operation_id: str) -> bool:
         """
@@ -337,6 +395,8 @@ class OperationManager:
         if operation:
             operation.cancelled = True
             logger.info(f"Cancellation requested for operation {operation_id}")
+            return True
+        if self._tombstone_is_live(operation_id):
             return True
         
         logger.warning(f"Cannot cancel unknown operation: {operation_id}")
@@ -362,7 +422,10 @@ class OperationManager:
         info = {
             "callback_url": callback_url,
             "operation_id": operation_id,
-            "client": client
+            "client": client,
+            # Tells the add-in this server answers /cancel-status from its own
+            # thread, so polling it cannot stall the operation.
+            "cancel_poll": True,
         }
         return json.dumps(info)
     
@@ -456,7 +519,9 @@ class OperationManager:
                         return {
                             "success": False,
                             "cancelled": True,
+                            "error_pattern": "operation_cancelled",
                             "message": message or "Operation cancelled",
+                            "error": message or "Operation cancelled",
                             "log_path": callback.get("log_path"),
                             "results_path": callback.get("results_path"),
                             "result": callback.get("result"),
@@ -467,12 +532,22 @@ class OperationManager:
                         
         except asyncio.TimeoutError:
             logger.error(f"Operation {operation_id} timed out after {timeout}s")
+            self.abandon_operation(operation_id)
             return {
                 "success": False,
-                "error": f"Operation timed out after {timeout} seconds"
+                "error": (
+                    f"Operation timed out after {timeout} seconds. "
+                    "The add-in was asked to stop it."
+                ),
+                "error_pattern": "timeout",
+                "operation_id": operation_id,
             }
+        except asyncio.CancelledError:
+            # The client stopped waiting; Access would otherwise run on unobserved.
+            self.abandon_operation(operation_id)
+            raise
         finally:
-            # Always cleanup
+            # A no-op after abandon_operation, which already unregistered it.
             self.unregister_operation(operation_id)
     
     def pending_count(self) -> int:

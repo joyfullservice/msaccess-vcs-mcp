@@ -272,7 +272,7 @@ Build a complete Access database from source files.
 
 Creates a fresh database from source files, useful for clean builds and distribution. Requires write permission.
 
-Runs the add-in's `BuildHeadless`, so the build never stops on a prompt, and returns when it is over with `success`, `errorCount`, `warningCount`, and `log_path`. Progress is a periodic heartbeat rather than per-object output. The call is bounded by `ACCESS_VCS_BUILD_TIMEOUT_SEC` (default 600 seconds).
+Runs the add-in's `BuildHeadless`, so the build never stops on a prompt, and returns when it is over with `success`, `errorCount`, `warningCount`, and `log_path`. Progress notifications carry the build log, with a heartbeat when it is quiet, and `vcs_cancel_operation` stops the build. The call is bounded by `ACCESS_VCS_BUILD_TIMEOUT_SEC` (default 600 seconds).
 
 **Args:**
 - `source_dir`: Directory containing source files
@@ -503,14 +503,19 @@ Returns `mcp_version`, `vcs_version`, `access_version`, `bitness`, `target_datab
 vcs_get_version_info()
 ```
 
-#### `vcs_cancel_operation(operation_id)`
+#### `vcs_cancel_operation(operation_id?, database_path?)`
 
-Cancel a running async operation. Requests cancellation of a long-running export, build, or import. The VBA add-in will detect the cancellation during its next DoEvents cycle.
+Cancel a running export, import, database rebuild, add-in rebuild, or test run. The add-in polls for the request about twice a second and stops at its next safe point; the tool that started the operation then returns `cancelled: true` with `error_pattern: "operation_cancelled"`. This tool answers while the operation it cancels holds Access.
 
 **Args:**
-- `operation_id`: UUID of the operation to cancel (returned by async tool calls)
+- `operation_id`: Operation to cancel (busy errors report it as `active_operation_id`)
+- `database_path`: Database whose running operation to cancel
+
+With neither argument it cancels the only running operation; when several run, it cancels nothing and lists them.
 
 ```python
+vcs_cancel_operation()
+vcs_cancel_operation(database_path="C:\\db.accdb")
 vcs_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
 ```
 

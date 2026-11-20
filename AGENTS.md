@@ -130,6 +130,14 @@ One MCP server process is shared across all Cursor windows. Sync tools run in a 
 
 `vcs_run_vba` executes Access COM work in a daemon worker thread with a hard timeout. If a snippet hangs because Access is in break mode, blocked on a modal dialog, or otherwise unresponsive, the MCP server abandons that thread and returns a recoverable timeout. It does **not** kill `MSACCESS.EXE` or close user-owned Access windows; after Access becomes responsive, the next call runs an automatic probe and resumes normal operation.
 
+### Cancelling an operation
+
+`vcs_cancel_operation(operation_id?, database_path?)` stops a running export, import, database rebuild, add-in rebuild, or test run; with no arguments it targets the only one running. It is gate-exempt and runs on the event loop, so every long tool must keep the loop free while Access works: whole-project export, merge, and test runs use `APIAsync` timer continuations, and the synchronous `ExportByType`, `ImportByType`, and `BuildHeadless` go through `_run_api_with_callbacks` on a worker thread. Never call a long add-in method with `call_sync` from an async tool.
+
+- **The add-in polls; the server only answers.** `Operation.Pulse` asks `/cancel-status/{id}` about twice a second, and only when the callback info carries `cancel_poll: true`. The callback server is a `ThreadingHTTPServer` so that poll is answered while another callback is in flight. An add-in built before this support never polls, so its operations cannot be cancelled from MCP.
+- **A wait that ends early abandons, never just unregisters.** On a wait timeout or client cancellation, `abandon_operation` marks the operation cancelled and keeps a ten-minute tombstone, so Access stops at its next poll instead of running on unobserved. A terminal callback for the id clears it.
+- **Results say so.** A canceled run returns `cancelled: true` and `error_pattern: "operation_cancelled"`; a canceled add-in rebuild ends with status `cancelled` and installs nothing.
+
 ### Agents never close Access windows
 
 Agents do not stop, kill, or quit `MSACCESS.EXE`. Never run `Stop-Process -Name MSACCESS`, `Get-Process MSACCESS | Stop-Process`, `taskkill /IM MSACCESS.EXE`, or any other command that selects Access by name. Other Cursor windows share this server, so an Access window you did not open may belong to another agent's run or to the user, and closing it destroys that work. A process list cannot tell you whose window it is.

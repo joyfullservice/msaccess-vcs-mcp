@@ -74,6 +74,54 @@ contradictory guidance.
 
 ---
 
+## 2026-11-20 — Cancel by add-in poll; every long tool keeps the event loop free
+
+**Trigger**: An operation started by automation could not be stopped: the
+add-in's progress window refused to cancel in unattended mode, and
+`vcs_cancel_operation` only set a flag the add-in never read (its COM call was
+commented out). The add-in side now funnels every cancel into
+`Operation.RequestCancel`; see the add-in's DECISIONS.md entry of the same date.
+
+**Options explored**:
+- *Call the add-in's `Cancel` API over COM from `vcs_cancel_operation`.*
+  Rejected. Access is single-threaded and busy running the operation, so the
+  call queues behind it; the server could also hang on a modal dialog.
+- *The add-in polls `/cancel-status/{id}` from `Operation.Pulse` (chosen).*
+  About twice a second, with sub-second `ServerXMLHTTP` timeouts. The server
+  had to become a `ThreadingHTTPServer`: on the single-threaded one a poll
+  queued behind a log callback, and every poll timed out (seen as a stalled
+  add-in rebuild). The add-in polls only when the callback info carries
+  `cancel_poll: true`, so an older server is never polled.
+- *Keep `call_sync` for scoped export/import and `BuildHeadless`.* Rejected.
+  `vcs_cancel_operation` is gate-exempt and runs on the event loop, and those
+  calls blocked it, so a cancel could not arrive until the work was done. They
+  now go through `APIAsync` with callback info on a worker thread
+  (`_run_api_with_callbacks`); an older add-in falls through to `API` there.
+- *Unregister an operation when its wait times out.* Rejected. Access keeps
+  running with nobody watching. `abandon_operation` marks it cancelled and
+  keeps a tombstone for ten minutes, or until a terminal callback arrives.
+
+**Decision**: Cancellation is cooperative and add-in driven. The server
+records the request; the add-in asks for it. `vcs_cancel_operation` takes an
+optional id or database path, and with neither cancels the only running
+operation. A timed-out or abandoned wait cancels as well. Canceled results
+carry `cancelled: true` and `error_pattern: "operation_cancelled"`, and a
+canceled add-in rebuild ends with status `cancelled`.
+
+**What this rules out**: Calling a long add-in method with `call_sync` from an
+async tool. Killing `MSACCESS.EXE` to cancel. Revisit if Access gains a way to
+interrupt a running VBA call from outside.
+
+**Relevant files**: `src/msaccess_vcs_mcp/tools.py` (`vcs_cancel_operation`,
+`_run_api_with_callbacks`, `_run_scoped_api`, `_mark_cancelled`),
+`src/msaccess_vcs_mcp/operation_manager.py` (`abandon_operation`, tombstones,
+`normalize_database_path`), `src/msaccess_vcs_mcp/callback_server.py`,
+`src/msaccess_vcs_mcp/rebuild_watcher.py`, `tests/test_cancel_operation.py`,
+`docs/VBA_CALLBACK_API.md`. Add-in side: `clsOperation.cls`, `clsMCP.cls`,
+`modAPI.bas`, `docs/automation-contract.md`.
+
+---
+
 ## 2026-10-30 — Unattended vcs_rebuild_database through BuildHeadless
 
 **Trigger**: A field report showed `vcs_rebuild_database` failing with "The
@@ -127,6 +175,12 @@ wait runs on the event loop instead of using `asyncio.to_thread`.
 `BuildHeadless` returns only when the build is over. `template_path` is
 accepted and ignored. Revisit if the add-in grows a headless build that
 streams callbacks.
+
+> **⚠ Partially superseded** (2026-11-20): `BuildHeadless` now runs through
+> `APIAsync` with callback info, so the build log streams as progress and the
+> build can be canceled; the heartbeat remains for quiet stretches, and
+> `_wait_for_build` is replaced by `_run_api_with_callbacks`. See "Cancel by
+> add-in poll; every long tool keeps the event loop free" above.
 
 **Relevant files**: `src/msaccess_vcs_mcp/tools.py` (`vcs_rebuild_database`,
 `_create_build_instance`, `_open_build_host`, `_wait_for_build`,
@@ -439,6 +493,11 @@ an ephemeral callback.
 - *Dedicated CLI that reimplements COM.* Rejected. A second operation path would drift from the MCP tools.
 
 **Decision**: A shared `MonotonicProgressReporter` owns an incrementing sequence and keeps VBA counts in the message, with `total=None`. Full export, merge, and database rebuild all pass `ctx`. `vcs_rebuild_addin(source_dir)` launches via existing `RebuildAddIn` (gate held only for launch), then watches `rebuild-status.json` with `ReadDirectoryChangesW` (poll fallback), correlating `phaseStarted`. Cancel abandons the wait only — it does not kill `MSACCESS.EXE` or `wscript`. `vcs_call_vba` stays launch-only. `msaccess-vcs` is a stdio MCP client for the same tools, printing progress with immediate flush. Status-file polling remains recovery after a client timeout or stall.
+
+> **⚠ Partially superseded** (2026-11-20): an abandoned rebuild wait now also
+> asks the add-in to stop, through a tombstoned operation its poll still sees,
+> and a canceled rebuild ends with status `cancelled`. Nothing is killed. See
+> "Cancel by add-in poll; every long tool keeps the event loop free" above.
 
 **What this rules out**: Treating Cursor chat progress as a keepalive or as guaranteed UI. Killing Access/wscript when a client stops waiting. Making generic `vcs_call_vba` wait minutes for install. Adopting deprecated MCP logging notifications. A second COM implementation beside the MCP server.
 

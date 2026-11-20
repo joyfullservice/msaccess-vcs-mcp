@@ -76,7 +76,11 @@ from .usage_logging import (
     read_recent_tool_calls,
     with_logging,
 )
-from .rebuild_watcher import get_rebuild_timeout, wait_for_rebuild_status
+from .rebuild_watcher import (
+    TERMINAL_STATUSES as REBUILD_TERMINAL_STATUSES,
+    get_rebuild_timeout,
+    wait_for_rebuild_status,
+)
 from .operation_manager import MonotonicProgressReporter
 from .vba_worker_manager import get_build_timeout, get_call_vba_timeout, run_vba_resilient
 
@@ -234,6 +238,7 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         if completion.get("cancelled"):
             parsed["cancelled"] = True
             parsed["success"] = False
+            parsed["error_pattern"] = "operation_cancelled"
         log_path = completion.get("log_path")
         if log_path:
             parsed.setdefault("log_path", log_path)
@@ -242,12 +247,14 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
 
     raw = completion.get("result")
     if raw not in (None, ""):
-        return _parse_test_runner_json(raw)
+        parsed = _parse_test_runner_json(raw)
+        return _mark_cancelled(parsed, completion) if completion.get("cancelled") else parsed
 
     if completion.get("cancelled"):
         return {
             "success": False,
             "cancelled": True,
+            "error_pattern": "operation_cancelled",
             "error": completion.get("message") or "Test run was cancelled",
         }
 
@@ -260,8 +267,9 @@ def _test_results_from_completion(completion: dict[str, Any]) -> dict[str, Any]:
         or completion.get("message")
         or "Test run failed",
     }
-    if completion.get("log_path"):
-        result["log_path"] = completion["log_path"]
+    for key in ("error_pattern", "operation_id", "log_path"):
+        if completion.get(key):
+            result[key] = completion[key]
     return result
 
 
@@ -371,7 +379,7 @@ mcp = FastMCP(
         "call vcs_rebuild_addin(\"<source folder>\"). It derives the development copy "
         "of the add-in (the `Version Control.accda` beside the source folder), launches "
         "RebuildAddIn, and waits on `<source>/logs/rebuild-status.json` with filesystem "
-        "notifications until status is `complete` or `*-failed`. Do NOT open a user "
+        "notifications until status is `complete`, `cancelled`, or `*-failed`. Do NOT open a user "
         "database, anything in the repo's Testing folder, or a scratch database to host "
         "this -- rebuilding the add-in is a repository operation and belongs to the "
         "repository's own copy. Prefer this over polling the status file yourself.\n"
@@ -463,7 +471,7 @@ mcp = FastMCP(
         "- vcs_get_log(database_path*, log_type?) — read Export or Build log\n"
         "- vcs_get_recent_calls(limit?) — recent tool_call entries from the usage log\n"
         "- vcs_end_session(database_path*) — end session, remove option overrides\n"
-        "- vcs_cancel_operation(operation_id*) — cancel a running async operation\n\n"
+        "- vcs_cancel_operation(operation_id?, database_path?) — cancel a running export, import, rebuild, or test run (no args: the only one running)\n\n"
         "**Common mistakes to avoid:**\n"
         "- Almost every tool requires database_path* — pass the full .accdb path.\n"
         "- vcs_run_vba() executes arbitrary VBA code you provide in the code* parameter. "
@@ -808,8 +816,9 @@ async def vcs_export_database(
                         "export_path": str(export_path),
                         "objects_by_type": {},
                     }
-                result = _addin_json_result(
-                    addin.call_sync("ExportByType", types_arg, full_export)
+                result = await _run_scoped_api(
+                    app, addin, "ExportByType", [types_arg, full_export],
+                    str(db_path), ctx, "Exporting",
                 )
                 result.setdefault("export_path", str(export_path))
                 return _attach_log_context(result, export_path, "Export")
@@ -845,13 +854,15 @@ async def vcs_export_database(
                         )
                         
                         if not completion.get("success"):
-                            return _attach_log_context({
+                            return _attach_log_context(_mark_cancelled({
                                 "success": False,
                                 "error": completion.get("error", "Export failed"),
+                                "error_pattern": completion.get("error_pattern"),
+                                "operation_id": completion.get("operation_id") or operation_id,
                                 "exported_count": 0,
                                 "export_path": str(export_path),
                                 "objects_by_type": {},
-                            }, export_path, "Export", completion)
+                            }, completion), export_path, "Export", completion)
                     else:
                         # Neither marker: the add-in never started the operation,
                         # so run it synchronously rather than reporting success
@@ -1203,7 +1214,7 @@ async def vcs_import_objects(
                     "hint": "Check if Access has any open dialogs or message boxes"
                 }
 
-            # Category-scoped merge: sync ImportByType (no progress callbacks).
+            # Category-scoped merge: ImportByType runs synchronously in Access.
             if object_types:
                 types_arg = _scoped_types_arg(object_types)
                 if not types_arg:
@@ -1212,8 +1223,9 @@ async def vcs_import_objects(
                         "error": "object_types was empty after stripping blanks",
                         "imported_count": 0,
                     }
-                result = _addin_json_result(
-                    addin.call_sync("ImportByType", types_arg, full_import)
+                result = await _run_scoped_api(
+                    app, addin, "ImportByType", [types_arg, full_import],
+                    str(db_path), ctx, "Merging",
                 )
                 result.setdefault("database_path", str(db_path))
                 result.setdefault("source_dir", str(src_path))
@@ -1259,11 +1271,13 @@ async def vcs_import_objects(
                                 "imported_count": 0,
                             }
                         if not completion.get("success"):
-                            return _attach_log_context({
+                            return _attach_log_context(_mark_cancelled({
                                 "success": False,
                                 "error": completion.get("error", "Import failed"),
+                                "error_pattern": completion.get("error_pattern"),
+                                "operation_id": completion.get("operation_id") or operation_id,
                                 "imported_count": 0,
-                            }, src_path, "Merge", completion)
+                            }, completion), src_path, "Merge", completion)
                     elif async_result.get("sync"):
                         # The add-in already ran the merge inline; re-running it
                         # here would merge twice. Fall through and resolve the
@@ -1402,23 +1416,182 @@ async def _remove_build_host(path: str) -> None:
         await asyncio.sleep(0.25)
 
 
-async def _wait_for_build(thread: threading.Thread, timeout: float, ctx: Any) -> None:
-    """Wait for the build thread without blocking the event loop.
+async def _run_api_with_callbacks(
+    acquire_app: Any,
+    addin_path: str,
+    command: str,
+    args: list[str],
+    *,
+    database_path: str,
+    timeout: float,
+    ctx: Any,
+    heartbeat: str,
+) -> dict[str, Any]:
+    """Run a long synchronous API method on a worker thread, cancellable from MCP.
 
-    ``BuildHeadless`` reports nothing until it returns, so the client gets a
-    heartbeat instead; without one a long build looks hung.
+    The method goes through ``APIAsync`` with callback info, so the add-in streams
+    its log, reports progress, and polls for cancellation, while the event loop
+    stays free to answer ``vcs_cancel_operation``. Without the callback server it
+    runs through ``API``. An add-in older than the callback support runs the
+    method through ``API`` either way and only streams nothing.
+
+    Returns ``run_result`` (the ``_start_application_call`` box, with the
+    ``{"sync":true,"result":...}`` wrapper removed), ``completion`` (the terminal
+    callback, if one arrived), ``log_messages``, ``operation_id``, and
+    ``timed_out``. On a timeout or client abandonment the operation is asked to
+    stop and left tombstoned.
     """
+    lib_name = os.path.splitext(os.path.abspath(addin_path))[0]
+    op_manager = _get_operation_manager()
+    callback_url = get_callback_url()
+    operation_id: str | None = None
+    queue: asyncio.Queue | None = None
+
+    if op_manager and callback_url:
+        op_manager.set_event_loop(asyncio.get_running_loop())
+        operation_id, queue = op_manager.register_operation(
+            timeout_ms=int(timeout * 1000),
+            database_path=database_path,
+            command=command,
+        )
+        callback_info = op_manager.create_callback_info(operation_id, callback_url, "cursor")
+        run_name, call_args = f"{lib_name}.APIAsync", [callback_info, command, *args]
+    else:
+        run_name, call_args = f"{lib_name}.API", [command, *args]
+
     reporter = MonotonicProgressReporter()
+    log_messages: list[str] = []
+    completion: dict[str, Any] | None = None
+
+    async def _drain() -> None:
+        nonlocal completion
+        while queue is not None and not queue.empty():
+            callback = queue.get_nowait()
+            msg_type = str(callback.get("type") or "")
+            message = str(callback.get("message") or "")
+            if msg_type == "progress":
+                await reporter.emit(
+                    ctx,
+                    message=message,
+                    vba_progress=callback.get("progress"),
+                    vba_total=callback.get("total"),
+                )
+            elif msg_type == "log" and message:
+                log_messages.append(message)
+                await reporter.emit(ctx, message=message)
+            elif msg_type in ("complete", "error", "cancelled"):
+                completion = dict(callback)
+                if msg_type == "cancelled":
+                    completion["cancelled"] = True
+
+    thread, run_result = _start_application_call(acquire_app, run_name, call_args)
     start = time.perf_counter()
     next_beat = start + _BUILD_HEARTBEAT_SEC
-    while thread.is_alive():
-        now = time.perf_counter()
-        if now - start >= timeout:
-            return
-        if now >= next_beat:
-            await reporter.emit(ctx, message=f"Building from source ({now - start:.0f}s)")
-            next_beat = now + _BUILD_HEARTBEAT_SEC
-        await asyncio.sleep(0.5)
+    timed_out = False
+    try:
+        while thread.is_alive():
+            now = time.perf_counter()
+            if now - start >= timeout:
+                timed_out = True
+                break
+            had_messages = len(log_messages)
+            await _drain()
+            if len(log_messages) != had_messages:
+                next_beat = now + _BUILD_HEARTBEAT_SEC
+            elif now >= next_beat:
+                await reporter.emit(ctx, message=f"{heartbeat} ({now - start:.0f}s)")
+                next_beat = now + _BUILD_HEARTBEAT_SEC
+            await asyncio.sleep(0.25)
+        # Callbacks posted just before the call returned may still be in flight.
+        await asyncio.sleep(0)
+        await _drain()
+    except asyncio.CancelledError:
+        if op_manager and operation_id:
+            op_manager.abandon_operation(operation_id)
+        raise
+
+    if op_manager and operation_id:
+        if timed_out:
+            op_manager.abandon_operation(operation_id)
+        else:
+            op_manager.unregister_operation(operation_id)
+
+    raw = run_result.get("result")
+    if isinstance(raw, tuple) and raw:
+        raw = raw[0]
+    if isinstance(raw, str) and run_name.endswith(".APIAsync"):
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("sync") and "result" in parsed:
+            raw = parsed["result"]
+        run_result["result"] = raw
+
+    return {
+        "run_result": run_result,
+        "completion": completion,
+        "log_messages": log_messages,
+        "operation_id": operation_id,
+        "timed_out": timed_out,
+    }
+
+
+async def _run_scoped_api(
+    app: Any,
+    addin: VCSAddinIntegration,
+    command: str,
+    args: list[Any],
+    db_path: str,
+    ctx: Any,
+    heartbeat: str,
+) -> dict[str, Any]:
+    """Run a category-scoped ``ExportByType`` / ``ImportByType`` and parse its JSON."""
+    timeout = get_build_timeout()
+    run = await _run_api_with_callbacks(
+        VCSAddinIntegration.worker_app_source(app, None),
+        addin.addin_path,
+        command,
+        args,
+        database_path=db_path,
+        timeout=timeout,
+        ctx=ctx,
+        heartbeat=heartbeat,
+    )
+    if run["timed_out"]:
+        return {
+            "success": False,
+            "error": (
+                f"{command} did not finish within {timeout:g} seconds "
+                "(ACCESS_VCS_BUILD_TIMEOUT_SEC). The add-in was asked to stop it."
+            ),
+            "error_pattern": "timeout",
+            "timed_out": True,
+            "operation_id": run["operation_id"],
+        }
+    run_result = run["run_result"]
+    if not run_result.get("success"):
+        return {
+            "success": False,
+            "error": _describe_run_failure(run_result.get("error"), command, command),
+        }
+    raw = run_result.get("result")
+    if isinstance(raw, str) and raw.startswith(_API_REFUSED_PREFIX):
+        return {"success": False, "error": raw[len(_API_REFUSED_PREFIX):]}
+    result = _addin_json_result(raw)
+    if run["log_messages"]:
+        result.setdefault("log_messages", run["log_messages"])
+    return _mark_cancelled(result, run["completion"])
+
+
+def _mark_cancelled(result: dict[str, Any], completion: dict[str, Any] | None) -> dict[str, Any]:
+    """Flag a tool result as canceled when the add-in or its callback says so."""
+    if result.get("cancelled") or (completion or {}).get("cancelled"):
+        result["success"] = False
+        result["cancelled"] = True
+        result["error_pattern"] = "operation_cancelled"
+        result.setdefault("error", "Operation was canceled.")
+    return result
 
 
 def _build_headless_result(
@@ -1468,8 +1641,9 @@ async def vcs_rebuild_database(
     Useful for clean builds and distribution.
     
     Runs the add-in's ``BuildHeadless``, which never prompts and returns when
-    the build is over. Progress notifications are a heartbeat only ("still
-    building"), not per-object progress. The call is bounded by
+    the build is over. Progress notifications carry the build log, with a
+    heartbeat when it is quiet. vcs_cancel_operation stops the build, which then
+    returns ``cancelled: true``. The call is bounded by
     ``ACCESS_VCS_BUILD_TIMEOUT_SEC`` (default 600 seconds).
     
     Examples:
@@ -1535,36 +1709,47 @@ async def vcs_rebuild_database(
             if refusal:
                 return refusal
 
-            call_args = ["BuildHeadless", str(src_path)]
+            build_args = [str(src_path)]
             if output_path:
-                call_args.append(str(output_path))
+                build_args.append(str(output_path))
             api_name = f"{os.path.splitext(os.path.abspath(addin.addin_path))[0]}.API"
             timeout = get_build_timeout()
 
-            thread, run_result = _start_application_call(
-                VCSAddinIntegration.worker_app_source(app, None), api_name, call_args
-            )
             build_running = True
-            await _wait_for_build(thread, timeout, ctx)
+            run = await _run_api_with_callbacks(
+                VCSAddinIntegration.worker_app_source(app, None),
+                addin.addin_path,
+                "BuildHeadless",
+                build_args,
+                database_path=str(output_path or src_path),
+                timeout=timeout,
+                ctx=ctx,
+                heartbeat="Building from source",
+            )
 
-            if thread.is_alive():
+            if run["timed_out"]:
                 return _attach_log_context({
                     "success": False,
                     "error": (
                         f"Build did not finish within {timeout:g} seconds "
-                        "(ACCESS_VCS_BUILD_TIMEOUT_SEC). It may still be running "
-                        "in the Access window, which is left open."
+                        "(ACCESS_VCS_BUILD_TIMEOUT_SEC). The add-in was asked to "
+                        "stop it; it may still be running in the Access window, "
+                        "which is left open."
                     ),
                     "error_pattern": "timeout",
                     "timed_out": True,
+                    "operation_id": run["operation_id"],
                     "output_path": output_path,
                     "source_dir": str(src_path),
                 }, src_path, "Build")
             build_running = False
 
-            return _build_headless_result(
-                run_result, api_name, src_path, output_path
+            result = _build_headless_result(
+                run["run_result"], api_name, src_path, output_path
             )
+            if run["log_messages"]:
+                result.setdefault("log_messages", run["log_messages"])
+            return _mark_cancelled(result, run["completion"])
         finally:
             # A build still running owns the instance; quitting it from here
             # would block until the build ends, and the host may still be open.
@@ -1625,6 +1810,9 @@ async def vcs_rebuild_addin(
     operation_id: str | None = None
     op_manager = None
     callback_task: asyncio.Task | None = None
+    # Set while a launched rebuild may still be running unobserved: on a watch
+    # that ends without a terminal status, or when the client stops waiting.
+    abandoned = False
 
     try:
         check_write_permission(get_config())
@@ -1751,14 +1939,19 @@ async def vcs_rebuild_addin(
                 )
             )
 
-        watched = await wait_for_rebuild_status(
-            status_file,
-            str(phase_started),
-            timeout_sec=timeout,
-            ctx=ctx,
-            reporter=reporter,
-            preexisting_access_pids=preexisting_access_pids,
-        )
+        try:
+            watched = await wait_for_rebuild_status(
+                status_file,
+                str(phase_started),
+                timeout_sec=timeout,
+                ctx=ctx,
+                reporter=reporter,
+                preexisting_access_pids=preexisting_access_pids,
+            )
+        except asyncio.CancelledError:
+            abandoned = True
+            raise
+        abandoned = watched.get("status") not in REBUILD_TERMINAL_STATUSES
         if callback_task is not None and callback_task.done():
             await callback_task
             callback_task = None
@@ -1787,7 +1980,10 @@ async def vcs_rebuild_addin(
             except asyncio.CancelledError:
                 pass
         if op_manager is not None and operation_id is not None:
-            op_manager.unregister_operation(operation_id)
+            if abandoned:
+                op_manager.abandon_operation(operation_id)
+            else:
+                op_manager.unregister_operation(operation_id)
 
 
 async def _forward_rebuild_callbacks(
@@ -1988,68 +2184,85 @@ def vcs_get_recent_calls(limit: int = 10) -> dict[str, Any]:
 
 
 @vcs_tool("vcs_cancel_operation")
-def vcs_cancel_operation(operation_id: str) -> dict[str, Any]:
+def vcs_cancel_operation(
+    operation_id: str | None = None,
+    database_path: str | None = None,
+) -> dict[str, Any]:
     """
-    Cancel a running async operation.
-    
-    Requests cancellation of a long-running operation (export, build, etc.).
-    The VBA add-in will detect the cancellation request during its next
-    DoEvents cycle and abort the operation.
-    
-    Note: Cancellation is cooperative - the operation will stop at the next
-    safe point, not immediately. The operation may take a few seconds to
-    respond depending on what it's doing.
-    
+    Cancel a running long operation: export, import, rebuild, or test run.
+
+    The target is, in order: the given operation_id; the operation running on
+    database_path; or the only operation running. With several running and
+    neither argument, nothing is cancelled and the running operations are listed.
+
+    Cancellation is cooperative. The add-in polls for it about twice a second and
+    stops at its next safe point; a test run stops after the current test. The
+    tool that started the operation then returns cancelled: true. A canceled
+    export or merge leaves the index as it was, so the next run redoes the work.
+
+    This tool is exempt from the Access gate, so it answers while the operation
+    it cancels holds Access.
+
     Examples:
-        # Cancel an export operation
+        vcs_cancel_operation()
+        vcs_cancel_operation(database_path=r"C:\\path\\to\\db.accdb")
         vcs_cancel_operation("a1b2c3d4-5678-90ab-cdef-1234567890ab")
-    
+
     Args:
-        operation_id: The UUID of the operation to cancel
-    
+        operation_id: Operation to cancel (busy errors report it as active_operation_id)
+        database_path: Database whose running operation to cancel
+
     Returns:
-        Dictionary with:
-        - success: Boolean indicating if cancellation was requested
-        - operation_id: The operation ID that was cancelled
-        - message: Status message
+        Dictionary with success, the operation_id and command cancelled, and a
+        message; or an error, with "operations" listing what is running when the
+        target was ambiguous or not found.
     """
     op_manager = _get_operation_manager()
-    
     if not op_manager:
-        return {
-            "success": False,
-            "error": "Callback system not available",
-            "operation_id": operation_id,
-        }
-    
-    # Request cancellation
-    cancelled = op_manager.request_cancel(operation_id)
-    
-    if cancelled:
-        # Also try to notify VBA immediately via COM (best effort)
-        # This is non-blocking - VBA will also poll /cancel-status
-        try:
-            config = get_config()
-            addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
-            # Attempt COM call to Cancel API - may block if Access is busy
-            # Using a short timeout would be ideal but COM doesn't support that
-            # So we just do best-effort here
-            # addin.call_sync("Cancel", operation_id)  # Uncomment when VBA side is ready
-        except Exception:
-            # COM call failed - that's OK, VBA will poll
-            pass
-        
+        return {"success": False, "error": "Callback system not available"}
+
+    def _cancelled(op_id: str, command: str | None) -> dict[str, Any]:
         return {
             "success": True,
-            "operation_id": operation_id,
-            "message": "Cancellation requested. Operation will stop at next safe point.",
+            "operation_id": op_id,
+            "command": command,
+            "message": "Cancellation requested. The operation stops at its next safe point.",
         }
-    else:
+
+    if operation_id:
+        operation = op_manager.get_operation(operation_id)
+        if op_manager.request_cancel(operation_id):
+            return _cancelled(operation_id, operation.command if operation else None)
         return {
             "success": False,
             "operation_id": operation_id,
             "error": "Operation not found or already completed",
+            "operations": op_manager.list_active_operations(),
         }
+
+    if database_path:
+        operation = op_manager.get_active_operation_for_database(database_path)
+        if operation and op_manager.request_cancel(operation.operation_id):
+            return _cancelled(operation.operation_id, operation.command)
+        return {
+            "success": False,
+            "database_path": database_path,
+            "error": "No operation is running on that database",
+            "operations": op_manager.list_active_operations(),
+        }
+
+    active = op_manager.list_active_operations()
+    if not active:
+        return {"success": False, "error": "No operation is running"}
+    if len(active) > 1:
+        return {
+            "success": False,
+            "error": "Several operations are running. Pass operation_id or database_path.",
+            "operations": active,
+        }
+    only = active[0]
+    op_manager.request_cancel(only["operation_id"])
+    return _cancelled(only["operation_id"], only["command"])
 
 
 @vcs_tool("vcs_check_vba_compiled")

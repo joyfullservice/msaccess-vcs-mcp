@@ -9,7 +9,7 @@ Callbacks are routed to the appropriate async operation queue based on operation
 import json
 import logging
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ class CallbackServer:
         self.callback_router = callback_router
         self.cancel_checker = cancel_checker
         self.cancel_requester = cancel_requester
-        self._server: Optional[HTTPServer] = None
+        self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
     
@@ -225,8 +225,11 @@ class CallbackServer:
             }
         )
         
-        # Create and bind server (port 0 = OS assigns available port)
-        self._server = HTTPServer((self.host, self.port), handler_class)
+        # Create and bind server (port 0 = OS assigns available port). Threaded so the
+        # add-in's blocking cancel check is never queued behind a log post whose body
+        # is still arriving.
+        self._server = ThreadingHTTPServer((self.host, self.port), handler_class)
+        self._server.daemon_threads = True
         
         # Get the actual port if we requested 0
         actual_port = self._server.server_address[1]

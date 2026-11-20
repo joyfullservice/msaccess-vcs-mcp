@@ -37,6 +37,7 @@ TERMINAL_STATUSES = frozenset({
     "build-failed",
     "compile-failed",
     "install-failed",
+    "cancelled",
 })
 
 WaitForChange = Callable[[str, float], bool]
@@ -266,6 +267,13 @@ async def wait_for_rebuild_status(
                     result["status_file"] = status_path
                     if status == "complete":
                         result["success"] = True
+                    elif status == "cancelled":
+                        result["success"] = False
+                        result["cancelled"] = True
+                        result["error_pattern"] = "operation_cancelled"
+                        result.setdefault(
+                            "error", record.get("error") or "The rebuild was canceled."
+                        )
                     else:
                         result["success"] = False
                         result.setdefault(

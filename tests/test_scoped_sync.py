@@ -31,16 +31,42 @@ def _write_log(source_dir, name, content="line one\nline two\n"):
     return path
 
 
+class _FinishedThread:
+    def is_alive(self):
+        return False
+
+
+def _scoped_addin(tmp_path, scoped_result):
+    """An add-in double whose scoped call runs through a recorded APIAsync."""
+    mock_addin = MagicMock()
+    mock_addin.addin_path = str(tmp_path / "Version Control.accda")
+    mock_addin.scoped_result = scoped_result
+    mock_addin.scoped_calls = []
+
+    def fake_application_call(_acquire_app, run_name, call_args):
+        mock_addin.scoped_calls.append((run_name, list(call_args)))
+        wrapped = json.dumps({"sync": True, "result": mock_addin.scoped_result})
+        return _FinishedThread(), {"success": True, "result": wrapped}
+
+    return mock_addin, fake_application_call
+
+
+def _scoped_call(mock_addin):
+    """The (command, args) of the one scoped APIAsync call, without callback info."""
+    assert len(mock_addin.scoped_calls) == 1
+    run_name, call_args = mock_addin.scoped_calls[0]
+    assert run_name.endswith(".APIAsync")
+    return call_args[1], call_args[2:]
+
+
 @contextmanager
-def _patch_import_tool(tmp_path, *, call_sync_result=None, async_result=None):
+def _patch_import_tool(tmp_path, *, scoped_result=None, async_result=None):
     mock_conn = MagicMock()
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
     mock_conn.connect.return_value = (MagicMock(), MagicMock())
 
-    mock_addin = MagicMock()
-    if call_sync_result is not None:
-        mock_addin.call_sync.return_value = call_sync_result
+    mock_addin, fake_application_call = _scoped_addin(tmp_path, scoped_result)
     mock_addin.call_async.return_value = async_result or {"async": True, "timeout_ms": 1000}
     mock_addin.merge_build.return_value = {"success": True, "message": "ok"}
 
@@ -67,6 +93,7 @@ def _patch_import_tool(tmp_path, *, call_sync_result=None, async_result=None):
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
         patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
         patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=op_manager),
+        patch("msaccess_vcs_mcp.tools._start_application_call", fake_application_call),
         patch(
             "msaccess_vcs_mcp.tools.get_config",
             return_value={"ACCESS_VCS_ADDIN_PATH": str(tmp_path / "Version Control.accda")},
@@ -76,15 +103,13 @@ def _patch_import_tool(tmp_path, *, call_sync_result=None, async_result=None):
 
 
 @contextmanager
-def _patch_export_tool(tmp_path, *, call_sync_result=None, async_result=None):
+def _patch_export_tool(tmp_path, *, scoped_result=None, async_result=None):
     mock_conn = MagicMock()
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
     mock_conn.__exit__ = MagicMock(return_value=False)
     mock_conn.connect.return_value = (MagicMock(), MagicMock())
 
-    mock_addin = MagicMock()
-    if call_sync_result is not None:
-        mock_addin.call_sync.return_value = call_sync_result
+    mock_addin, fake_application_call = _scoped_addin(tmp_path, scoped_result)
     mock_addin.call_async.return_value = async_result or {"async": True, "timeout_ms": 1000}
     mock_addin.export_source.return_value = {"success": True, "message": "ok"}
 
@@ -110,6 +135,7 @@ def _patch_export_tool(tmp_path, *, call_sync_result=None, async_result=None):
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
         patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
         patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=op_manager),
+        patch("msaccess_vcs_mcp.tools._start_application_call", fake_application_call),
         patch(
             "msaccess_vcs_mcp.tools.get_config",
             return_value={"ACCESS_VCS_ADDIN_PATH": str(tmp_path / "Version Control.accda")},
@@ -135,7 +161,7 @@ class TestImportObjectsScoped:
 
         with _patch_import_tool(tmp_path) as (db_path, src_path, mock_addin, _):
             log = _write_log(src_path, "Merge_20260807_120000_000.log")
-            mock_addin.call_sync.return_value = json.dumps(
+            mock_addin.scoped_result = json.dumps(
                 {"success": True, "logPath": str(log)}
             )
             result = asyncio.run(
@@ -144,7 +170,7 @@ class TestImportObjectsScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with("ImportByType", "modules", False)
+        assert _scoped_call(mock_addin) == ("ImportByType", ["modules", False])
         mock_addin.call_async.assert_not_called()
         mock_addin.merge_build.assert_not_called()
         assert result["success"] is True
@@ -154,7 +180,7 @@ class TestImportObjectsScoped:
         from msaccess_vcs_mcp.tools import vcs_import_objects
 
         payload = json.dumps({"success": True, "logPath": "C:\\x.log"})
-        with _patch_import_tool(tmp_path, call_sync_result=payload) as (
+        with _patch_import_tool(tmp_path, scoped_result=payload) as (
             db_path,
             src_path,
             mock_addin,
@@ -169,9 +195,7 @@ class TestImportObjectsScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with(
-            "ImportByType", ["queries", "forms"], True
-        )
+        assert _scoped_call(mock_addin) == ("ImportByType", [["queries", "forms"], True])
 
     def test_none_object_types_uses_async_merge(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_import_objects
@@ -198,7 +222,7 @@ class TestImportObjectsScoped:
                 "error": "Import not supported for component type(s): Table Data.",
             }
         )
-        with _patch_import_tool(tmp_path, call_sync_result=payload) as (
+        with _patch_import_tool(tmp_path, scoped_result=payload) as (
             db_path,
             src_path,
             _,
@@ -216,7 +240,7 @@ class TestImportObjectsScoped:
     def test_empty_object_types_rejected(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_import_objects
 
-        with _patch_import_tool(tmp_path, call_sync_result="{}") as (
+        with _patch_import_tool(tmp_path, scoped_result="{}") as (
             db_path,
             src_path,
             mock_addin,
@@ -229,7 +253,7 @@ class TestImportObjectsScoped:
             )
 
         assert result["success"] is False
-        mock_addin.call_sync.assert_not_called()
+        assert mock_addin.scoped_calls == []
 
 
 class TestExportDatabaseScoped:
@@ -238,7 +262,7 @@ class TestExportDatabaseScoped:
 
         with _patch_export_tool(tmp_path) as (db_path, export_path, mock_addin, _):
             log = _write_log(export_path, "Export_20260807_120000_000.log")
-            mock_addin.call_sync.return_value = json.dumps(
+            mock_addin.scoped_result = json.dumps(
                 {"success": True, "logPath": str(log)}
             )
             result = asyncio.run(
@@ -247,7 +271,7 @@ class TestExportDatabaseScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with("ExportByType", "modules", False)
+        assert _scoped_call(mock_addin) == ("ExportByType", ["modules", False])
         mock_addin.call_async.assert_not_called()
         assert result["success"] is True
         assert result["log_path"] == str(log)
@@ -256,7 +280,7 @@ class TestExportDatabaseScoped:
         from msaccess_vcs_mcp.tools import vcs_export_database
 
         payload = json.dumps({"success": True, "logPath": "C:\\x.log"})
-        with _patch_export_tool(tmp_path, call_sync_result=payload) as (
+        with _patch_export_tool(tmp_path, scoped_result=payload) as (
             db_path,
             export_path,
             mock_addin,
@@ -271,7 +295,7 @@ class TestExportDatabaseScoped:
                 )
             )
 
-        mock_addin.call_sync.assert_called_once_with("ExportByType", "queries", True)
+        assert _scoped_call(mock_addin) == ("ExportByType", ["queries", True])
 
     def test_none_object_types_uses_async_export(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_export_database
@@ -294,7 +318,7 @@ class TestExportDatabaseScoped:
         from msaccess_vcs_mcp.tools import vcs_export_database
 
         payload = json.dumps({"success": True, "logPath": "C:\\x.log"})
-        with _patch_export_tool(tmp_path, call_sync_result=payload) as (
+        with _patch_export_tool(tmp_path, scoped_result=payload) as (
             db_path,
             export_path,
             mock_addin,
@@ -307,7 +331,7 @@ class TestExportDatabaseScoped:
             )
 
         mock_addin.call_async.assert_not_called()
-        assert mock_addin.call_sync.call_args[0][0] == "ExportByType"
+        assert _scoped_call(mock_addin)[0] == "ExportByType"
 
     def test_addin_validation_error_propagates(self, tmp_path):
         from msaccess_vcs_mcp.tools import vcs_export_database
@@ -315,7 +339,7 @@ class TestExportDatabaseScoped:
         payload = json.dumps(
             {"success": False, "error": "Unknown object type(s): bogons."}
         )
-        with _patch_export_tool(tmp_path, call_sync_result=payload) as (
+        with _patch_export_tool(tmp_path, scoped_result=payload) as (
             db_path,
             export_path,
             _,
