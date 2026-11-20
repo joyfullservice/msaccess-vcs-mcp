@@ -35,6 +35,7 @@ from .usage_logging import (
 
 DEFAULT_RUN_VBA_TIMEOUT_SEC = 45.0
 DEFAULT_CALL_VBA_TIMEOUT_SEC = 45.0
+DEFAULT_BUILD_TIMEOUT_SEC = 600.0
 DEFAULT_RECOVERY_PROBE_TIMEOUT_SEC = 10.0
 
 
@@ -102,6 +103,13 @@ def get_call_vba_timeout(timeout_seconds: float | None = None) -> float:
     if timeout_seconds is not None and timeout_seconds > 0:
         return float(timeout_seconds)
     return _read_timeout_env("ACCESS_VCS_CALL_VBA_TIMEOUT_SEC", DEFAULT_CALL_VBA_TIMEOUT_SEC)
+
+
+def get_build_timeout(timeout_seconds: float | None = None) -> float:
+    """Resolve the effective timeout for one `vcs_rebuild_database` build."""
+    if timeout_seconds is not None and timeout_seconds > 0:
+        return float(timeout_seconds)
+    return _read_timeout_env("ACCESS_VCS_BUILD_TIMEOUT_SEC", DEFAULT_BUILD_TIMEOUT_SEC)
 
 
 def get_recovery_probe_timeout() -> float:

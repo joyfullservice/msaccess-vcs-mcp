@@ -59,7 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build a fresh database from source",
     )
     rebuild_db.add_argument("source_dir")
-    rebuild_db.add_argument("output_path")
+    rebuild_db.add_argument(
+        "output_path",
+        nargs="?",
+        default=None,
+        help="File to build (default: the file the source files name)",
+    )
     rebuild_db.add_argument("--template", dest="template_path", default=None)
 
     rebuild_addin = sub.add_parser(
@@ -109,10 +114,9 @@ def arguments_for(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
             "source_dir": args.source_dir,
         }
     if args.command == "rebuild-database":
-        payload = {
-            "source_dir": args.source_dir,
-            "output_path": args.output_path,
-        }
+        payload = {"source_dir": args.source_dir}
+        if args.output_path:
+            payload["output_path"] = args.output_path
         if args.template_path:
             payload["template_path"] = args.template_path
         return "vcs_rebuild_database", payload

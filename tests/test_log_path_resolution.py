@@ -9,10 +9,11 @@ that spares agents a follow-up call into a gitignored folder.
 import asyncio
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from msaccess_vcs_mcp.addin_integration import MERGE_NOT_AVAILABLE_MESSAGE
 from msaccess_vcs_mcp.tools import (
     _addin_json_result,
     _attach_log_context,
@@ -333,7 +334,7 @@ class TestSyncPassthroughTools:
 
 
 @contextmanager
-def _patch_merge_tool(tmp_path, async_result):
+def _patch_merge_tool(tmp_path, async_result, completion=None):
     """Patch the async merge plumbing for vcs_import_objects."""
     mock_conn = MagicMock()
     mock_conn.__enter__ = MagicMock(return_value=mock_conn)
@@ -352,6 +353,8 @@ def _patch_merge_tool(tmp_path, async_result):
     op_manager = MagicMock()
     op_manager.register_operation.return_value = ("op-1", MagicMock())
     op_manager.create_callback_info.return_value = "{}"
+    if completion is not None:
+        op_manager.wait_for_completion = AsyncMock(return_value=completion)
 
     with (
         patch("msaccess_vcs_mcp.tools.AccessConnection", return_value=mock_conn),
@@ -417,3 +420,41 @@ class TestImportObjectsAsyncPaths:
 
         assert result["success"] is False
         assert "bad source file" in result["log_excerpt"]
+
+    def test_merge_not_available_callback_returns_without_waiting(self, tmp_path):
+        """The add-in's error callback ends the wait, and an old log is not blamed."""
+        from msaccess_vcs_mcp.tools import vcs_import_objects
+
+        completion = {
+            "success": False,
+            "error": "Merge Build Not Available: ...",
+            "code": "merge_not_available",
+            "log_path": None,
+        }
+        with _patch_merge_tool(
+            tmp_path, {"async": True, "timeout_ms": 300000}, completion
+        ) as (db_path, src_path, mock_addin):
+            _write_log(src_path, "Merge_20260807_120000_000.log", "an earlier merge\n")
+            result = asyncio.run(_unwrap_sync(vcs_import_objects)(db_path, str(src_path)))
+
+        mock_addin.merge_build.assert_not_called()
+        assert result["success"] is False
+        assert result["error"] == MERGE_NOT_AVAILABLE_MESSAGE
+        assert result["error_pattern"] == "merge_not_available"
+        assert "log_path" not in result
+        assert "log_excerpt" not in result
+
+    def test_merge_not_available_in_sync_fallback_skips_stale_log(self, tmp_path):
+        from msaccess_vcs_mcp.tools import vcs_import_objects
+
+        with _patch_merge_tool(tmp_path, {}) as (db_path, src_path, mock_addin):
+            mock_addin.merge_build.return_value = {
+                "success": False,
+                "message": MERGE_NOT_AVAILABLE_MESSAGE,
+            }
+            _write_log(src_path, "Merge_20260807_120000_000.log", "an earlier merge\n")
+            result = asyncio.run(_unwrap_sync(vcs_import_objects)(db_path, str(src_path)))
+
+        assert result["success"] is False
+        assert result["error_pattern"] == "merge_not_available"
+        assert "log_path" not in result

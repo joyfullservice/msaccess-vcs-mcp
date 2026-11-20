@@ -399,8 +399,8 @@ def test_rebuild_database_closes_owned_output(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_module, "_check_database_busy", lambda _p: None)
     monkeypatch.setattr(
         tools_module,
-        "ensure_dispatch",
-        lambda _id: (_ for _ in ()).throw(RuntimeError("stop after pre-flight")),
+        "_create_build_instance",
+        lambda: (_ for _ in ()).throw(RuntimeError("stop after pre-flight")),
     )
 
     result = asyncio.run(

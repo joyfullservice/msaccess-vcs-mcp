@@ -266,18 +266,21 @@ vcs_import_objects("C:\\db.accdb", "C:\\src\\mydb")
 vcs_import_objects("C:\\db.accdb", "C:\\src\\mydb", object_types=["modules"], full_import=True)
 ```
 
-#### `vcs_rebuild_database(source_dir, output_path, template_path)`
+#### `vcs_rebuild_database(source_dir, output_path=None, template_path=None)`
 
 Build a complete Access database from source files.
 
 Creates a fresh database from source files, useful for clean builds and distribution. Requires write permission.
 
+Runs the add-in's `BuildHeadless`, so the build never stops on a prompt, and returns when it is over with `success`, `errorCount`, `warningCount`, and `log_path`. Progress is a periodic heartbeat rather than per-object output. The call is bounded by `ACCESS_VCS_BUILD_TIMEOUT_SEC` (default 600 seconds).
+
 **Args:**
 - `source_dir`: Directory containing source files
-- `output_path`: Path for the new database file
-- `template_path`: Optional template database to use as starting point
+- `output_path`: Optional path for the new database file. Omit it to build to the file the source files name. A different path needs add-in 5.1.1 or later; an older add-in is refused before the build starts.
+- `template_path`: Accepted and ignored; the add-in builds into a new blank database
 
 ```python
+vcs_rebuild_database("C:\\src\\mydb")
 vcs_rebuild_database("C:\\src\\mydb", "C:\\output\\fresh.accdb")
 ```
 

@@ -147,16 +147,24 @@ Maps to VBA:
 VCS().MergeBuild()  ' via HandleRibbonCommand("btnMergeBuild")
 ```
 
+`MergeBuild` returns `False` (add-in 5.1.1 and later) when the database has no
+full build or full export to merge against; `merge_build` reports that as a
+failure with `MERGE_NOT_AVAILABLE_MESSAGE`.
+
 **Build from Source:**
-```python
-result = addin.build_from_source(source_folder, output_path)
+
+`vcs_rebuild_database` calls the add-in's headless build directly rather than
+going through this class:
+
+```vba
+VCS().BuildHeadless(source_folder)               ' builds to the file the source names
+VCS().BuildHeadless(source_folder, output_path)  ' 5.1.1 and later
 ```
 
-Maps to VBA:
-```vba
-VCS().Build(source_folder)  ' via HandleRibbonCommand("btnBuild")
-VCS().BuildAs()  ' via HandleRibbonCommand("btnBuildAs")
-```
+It returns JSON when the build is over and never prompts. `Build` and `BuildAs`
+are the ribbon's entry points: `BuildAs` shows a folder picker and a Save As
+dialog, so it is not usable unattended. Access cannot run a library procedure
+with no database open, so the tool opens a scratch database to call it from.
 
 ## Result Handling
 

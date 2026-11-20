@@ -105,6 +105,7 @@ Key variables:
 - `ACCESS_VCS_ENABLE_LOGGING` — set `true` to enable usage logging
 - `ACCESS_VCS_RUN_VBA_TIMEOUT_SEC` — parent-side timeout for `vcs_run_vba` worker processes (default 45s)
 - `ACCESS_VCS_CALL_VBA_TIMEOUT_SEC` — parent-side timeout for `vcs_call_vba` `Application.Run` calls (default 45s)
+- `ACCESS_VCS_BUILD_TIMEOUT_SEC` — how long `vcs_rebuild_database` waits for the add-in's `BuildHeadless` to return (default 600s); on timeout Access is left open
 - `ACCESS_VCS_REBUILD_TIMEOUT_SEC` — how long `vcs_rebuild_addin` waits after launch for a terminal status (default 1200s)
 - `ACCESS_VCS_BUSY_WAIT_SEC` — how long a second tool call waits for the Access gate before returning `server_busy` (default 15s)
 - `ACCESS_VCS_RECOVERY_PROBE_TIMEOUT_SEC` — timeout for automatic Access/add-in recovery probes after a VBA timeout or COM disconnect (default 10s)
@@ -128,6 +129,12 @@ The rules, all enforced in `access_com/instance_registry.py` and `access_com/con
 One MCP server process is shared across all Cursor windows. Sync tools run in a single COM apartment thread with one Access operation at a time. A long call in one window causes others to get `error_pattern: server_busy` with `busy_with` naming the in-flight tool — retry rather than waiting for a client `-32001` timeout. After any client timeout, call `vcs_get_recent_calls()` to see what actually executed.
 
 `vcs_run_vba` executes Access COM work in a daemon worker thread with a hard timeout. If a snippet hangs because Access is in break mode, blocked on a modal dialog, or otherwise unresponsive, the MCP server abandons that thread and returns a recoverable timeout. It does **not** kill `MSACCESS.EXE` or close user-owned Access windows; after Access becomes responsive, the next call runs an automatic probe and resumes normal operation.
+
+### Agents never close Access windows
+
+Agents do not stop, kill, or quit `MSACCESS.EXE`. Never run `Stop-Process -Name MSACCESS`, `Get-Process MSACCESS | Stop-Process`, `taskkill /IM MSACCESS.EXE`, or any other command that selects Access by name. Other Cursor windows share this server, so an Access window you did not open may belong to another agent's run or to the user, and closing it destroys that work. A process list cannot tell you whose window it is.
+
+When Access hangs or holds a file you need, leave the window and say so: name the PID and what it holds, and let the user close it. The one exception is a process your own script started in this session, such as a `New-Object -ComObject Access.Application` you created. Stop that one by the PID you recorded when you created it, and confirm its start time first.
 
 ### Rebuilding the VCS add-in
 

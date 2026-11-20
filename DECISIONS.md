@@ -74,6 +74,70 @@ contradictory guidance.
 
 ---
 
+## 2026-10-30 — Unattended vcs_rebuild_database through BuildHeadless
+
+**Trigger**: A field report showed `vcs_rebuild_database` failing with "The
+application called an interface that was marshalled for a different thread"
+before reaching the add-in, and `vcs_import_objects` waiting out its timeout on
+a database with no index. Fixing the thread error exposed two more failures
+that would have come next: `BuildAs` shows a folder picker and a Save As
+dialog and ignores `output_path`, and `Application.Run` into the add-in with
+no database open crashes Access ("The server threw an exception", then RPC
+server unavailable).
+
+**Options explored**:
+- *Keep the async `Build` / `BuildAs` path and suppress its dialogs.* Rejected.
+  `BuildAs` exists to ask a person where to build; teaching it to stay quiet
+  duplicates `BuildHeadless`, which already forces unattended mode and returns
+  a JSON outcome.
+- *`BuildHeadless` with no database open, as the add-in's CI example did.*
+  Rejected after testing: Access needs a current database to run a library
+  procedure. The tool opens a scratch database in a temp folder, calls the
+  build from there, and deletes it. The add-in's Wiki example was corrected too.
+- *Always pass `output_path` to `BuildHeadless`.* Rejected. An extra argument to
+  an older add-in raises inside the library, and Access shows an error dialog
+  that blocks the call. The tool reads `GetVCSVersion` first: 5.1.0 is needed
+  for `BuildHeadless`, 5.1.1 for its output path. `output_path` is now optional
+  so a user on 5.1.0 can still build to the file the source files name.
+- *Pre-check the index from the server before `MergeBuild`.* Not done. The
+  add-in now posts an `error` callback with `code: merge_not_available` and
+  returns `False`, which covers every caller of the API, not only this server.
+  Add-ins older than 5.1.1 still wait out the timeout.
+- *Attach with `ensure_dispatch`, as the old code did.* Rejected. It can return
+  a window the user already has open; the old code then quit that window, and
+  opening a scratch database there would also close whatever it held. Found in
+  testing with a development copy left open by a test run ("You already have
+  the database open"). Every build gets its own process from `DispatchEx`.
+
+**Decision**: `vcs_rebuild_database` starts its own Access process, loads the
+add-in from a scratch host database, and runs `BuildHeadless(source[, output])`
+on a worker thread, polled from the event loop with a heartbeat progress
+message every 15 seconds and bounded by `ACCESS_VCS_BUILD_TIMEOUT_SEC` (default 600). On timeout Access is
+left open, since the build may still be running there. When no database path
+can be looked up in the Running Object Table, worker threads get the caller's
+proxy through `CoMarshalInterThreadInterfaceInStream` /
+`CoGetInterfaceAndReleaseStream` (`VCSAddinIntegration.worker_app_source`).
+Access is out of process, so the unmarshalled proxy calls Access directly; a
+probe against real Access answered while the main thread sat blocked in
+`join`, so the timeout still holds. The marshal has to happen on the thread
+that owns the proxy, which is why the call starts on the COM executor and the
+wait runs on the event loop instead of using `asyncio.to_thread`.
+
+**What this rules out**: Per-object build progress in `vcs_rebuild_database`;
+`BuildHeadless` returns only when the build is over. `template_path` is
+accepted and ignored. Revisit if the add-in grows a headless build that
+streams callbacks.
+
+**Relevant files**: `src/msaccess_vcs_mcp/tools.py` (`vcs_rebuild_database`,
+`_create_build_instance`, `_open_build_host`, `_wait_for_build`,
+`_start_application_call`, `_merge_fallback_failure`), `src/msaccess_vcs_mcp/addin_integration.py`
+(`worker_app_source`, `merge_build`, `MERGE_NOT_AVAILABLE_MESSAGE`),
+`src/msaccess_vcs_mcp/vba_worker_manager.py` (`get_build_timeout`),
+`tests/test_rebuild_database.py`. Add-in side: `clsVersionControl.cls`
+(`MergeBuild`, `BuildHeadless`), `docs/automation-contract.md`.
+
+---
+
 ## 2026-09-10 — Persist server-created Access; own it by PID
 
 **Trigger**: Merge / test / edit loops were spawning a new `MSACCESS.EXE` per
@@ -513,6 +577,12 @@ through this tool for as long as the timeout existed.
   / `CoGetInterfaceAndReleaseStream`). Rejected. A marshalled STA pointer serializes
   the call back onto the apartment that created it, so the calling thread blocks
   anyway and the timeout this function exists to impose never fires.
+
+> **⚠ Partially superseded** (2026-10-30): For out-of-process Access the
+> unmarshalled proxy calls Access directly, and the timeout holds; marshalling
+> is now the fallback when there is no database path to look up in the ROT.
+> The ROT lookup remains the first choice. See "Unattended vcs_rebuild_database
+> through BuildHeadless" above.
 - *Run the call on the main thread and time out around it.* Rejected. There is
   nothing to time out around — a blocking COM call on the calling thread cannot be
   abandoned.
@@ -798,6 +868,11 @@ That started as an `Err.Raise` and had to be changed after testing. An error rai
 - **Honor the gate; switch every call site to `addin.load_addin(app, db_path=...)` (chosen)**. Pays one extra `Application.Run` per tool call (typically <10ms once Access has the add-in resident, ~50-200ms on the very first call while it loads). In exchange: lifecycle errors surface at the lifecycle boundary with a single, actionable message, and we have a natural place to attach the hang-protection timeout.
 
 **Hang-protection sub-decision**: For the timeout on `GetVCSVersion`, evaluated `CoCancelCall` (requires server-side cooperation Jet/ACE doesn't implement), killing `MSACCESS.EXE` (loses unsaved work), subprocess isolation (overkill for a sub-second probe), and the disposable-worker-thread pattern that sibling project [`db-inspector-mcp`](C:/Repos/db-inspector-mcp/DECISIONS.md) already evaluated and shipped for DAO query timeouts. The worker-thread pattern is the only practical solution for in-process Access COM. Lifted with light edits: daemon thread + `thread.join(timeout)` + class-level `_active_probe_thread` guard against zombie pile-up + `pythoncom.CoInitialize()` per worker + ROT-based proxy re-acquisition (so the worker has its own apartment-local proxy instead of marshaling back to the main thread, which would defeat the timeout). Configurable via `ACCESS_VCS_PROBE_TIMEOUT_SEC` (default 10s -- short enough to feel responsive, long enough to absorb genuine first-load latency).
+
+> **⚠ Partially superseded** (2026-10-30): Marshalling does not defeat the
+> timeout for out-of-process Access, and a probe with no `db_path` now
+> marshals the caller's proxy rather than sharing it. See "Unattended
+> vcs_rebuild_database through BuildHeadless" above.
 
 **Pre-flight sub-decision**: When `db_path` is supplied to `load_addin()`, run an `os.path.isfile(db_path)` check before any COM activity. Catches stale or typo paths in ~1ms instead of burning the full 10s timeout in ROT lookup for a database that simply isn't there. Defense in depth: today only `tools.py` call sites validate paths via `validate_database_path()`; `validation.py`, `_cleanup_session`, and the internal `get_version_info` did not.
 

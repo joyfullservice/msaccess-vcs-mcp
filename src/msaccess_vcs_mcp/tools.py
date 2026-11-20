@@ -31,7 +31,9 @@ import glob
 import inspect
 import json
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -46,10 +48,9 @@ from .access_com.connection import (
     access_instance_is_live,
     close_owned_instances_holding,
     ensure_access_visible,
-    ensure_dispatch,
 )
 from .access_com.dao_helpers import list_query_defs, list_table_defs
-from .access_com.process_qos import list_access_pids, prefer_full_power_if_created
+from .access_com.process_qos import list_access_pids, prefer_full_power_app
 from .access_gate import EXEMPT_TOOLS, get_access_gate
 from .config import (
     get_config,
@@ -58,7 +59,11 @@ from .config import (
     initialize_from_workspace,
     load_config,
 )
-from .addin_integration import API_REFUSED_PREFIX as _API_REFUSED_PREFIX, VCSAddinIntegration
+from .addin_integration import (
+    API_REFUSED_PREFIX as _API_REFUSED_PREFIX,
+    MERGE_NOT_AVAILABLE_MESSAGE,
+    VCSAddinIntegration,
+)
 from .security import (
     validate_database_path,
     validate_export_directory,
@@ -73,7 +78,7 @@ from .usage_logging import (
 )
 from .rebuild_watcher import get_rebuild_timeout, wait_for_rebuild_status
 from .operation_manager import MonotonicProgressReporter
-from .vba_worker_manager import get_call_vba_timeout, run_vba_resilient
+from .vba_worker_manager import get_build_timeout, get_call_vba_timeout, run_vba_resilient
 
 _COMPILE_FAILURE_AGENT_GUIDANCE = (
     "Compilation failed. MCP cannot report the failing module or line. "
@@ -436,8 +441,8 @@ mcp = FastMCP(
         "scoped merges reconcile deletions and take no backup\n"
         "- vcs_import_object(database_path*, object_type*, object_name?) "
         "— import a single object/type from source\n"
-        "- vcs_rebuild_database(source_dir*, output_path*, template_path?) "
-        "— build fresh database from source\n"
+        "- vcs_rebuild_database(source_dir*, output_path?, template_path?) "
+        "— build fresh database from source (unattended; output_path needs add-in 5.1.1+)\n"
         "- vcs_rebuild_addin(source_dir*, timeout_seconds?) "
         "— rebuild the VCS add-in from source and wait for install\n"
         "- vcs_diff_database(database_path*, source_dir*, show_details?) "
@@ -1069,6 +1074,21 @@ async def vcs_diff_database(
         }
 
 
+def _merge_fallback_failure(result: dict[str, Any], src_path: Path) -> dict[str, Any]:
+    """Tool result for a failed synchronous ``merge_build`` fallback."""
+    failure: dict[str, Any] = {
+        "success": False,
+        "error": result["message"],
+        "imported_count": 0,
+    }
+    if result["message"] == MERGE_NOT_AVAILABLE_MESSAGE:
+        # No log was started, so the newest Merge log on disk belongs to an
+        # earlier run.
+        failure["error_pattern"] = "merge_not_available"
+        return failure
+    return _attach_log_context(failure, src_path, "Merge")
+
+
 @vcs_tool("vcs_import_objects")
 async def vcs_import_objects(
     database_path: str,
@@ -1084,6 +1104,12 @@ async def vcs_import_objects(
     a full project merge (``MergeBuild``) with progress callbacks. With
     ``object_types``, runs a category-scoped merge via ``ImportByType`` —
     only those categories are touched.
+    
+    A full project merge needs a prior full build or full export of the
+    database. Without one it returns ``error_pattern: merge_not_available``
+    and imports nothing; run ``vcs_rebuild_database`` (or a full export)
+    first. (Add-in builds before 5.1.1 report nothing in that case, and the
+    call waits out its timeout.)
     
     **Scoped import (when object_types is set):**
     
@@ -1223,6 +1249,15 @@ async def vcs_import_objects(
                             timeout_seconds=timeout_ms / 1000
                         )
                         
+                        if completion.get("code") == "merge_not_available":
+                            # No log was started, so the newest Merge log on
+                            # disk belongs to an earlier run.
+                            return {
+                                "success": False,
+                                "error": MERGE_NOT_AVAILABLE_MESSAGE,
+                                "error_pattern": "merge_not_available",
+                                "imported_count": 0,
+                            }
                         if not completion.get("success"):
                             return _attach_log_context({
                                 "success": False,
@@ -1241,32 +1276,20 @@ async def vcs_import_objects(
                         op_manager.unregister_operation(operation_id)
                         result = addin.merge_build(str(db_path), str(src_path))
                         if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "imported_count": 0,
-                            }, src_path, "Merge")
+                            return _merge_fallback_failure(result, src_path)
                 except Exception as e:
                     # Async call failed - fall back to sync
                     completion = None
                     op_manager.unregister_operation(operation_id)
                     result = addin.merge_build(str(db_path), str(src_path))
                     if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "imported_count": 0,
-                        }, src_path, "Merge")
+                        return _merge_fallback_failure(result, src_path)
             else:
                 # Use sync path
                 completion = None
                 result = addin.merge_build(str(db_path), str(src_path))
                 if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "imported_count": 0,
-                    }, src_path, "Merge")
+                    return _merge_fallback_failure(result, src_path)
             
             return _attach_log_context({
                 "success": True,
@@ -1289,10 +1312,152 @@ async def vcs_import_objects(
         }
 
 
+# BuildHeadless arrived in 5.1.0 and took an output path from 5.1.1. An extra
+# argument raises inside the library, which Access shows as a modal dialog rather
+# than returning, so the version has to be checked before the call is made.
+_BUILD_HEADLESS_MIN_VERSION = (5, 1, 0)
+_BUILD_HEADLESS_OUTPUT_MIN_VERSION = (5, 1, 1)
+_BUILD_HEARTBEAT_SEC = 15.0
+_BUILD_HOST_RELEASE_SEC = 5.0
+
+
+def _parse_addin_version(value: Any) -> tuple[int, ...] | None:
+    """Return ``(5, 1, 1)`` for ``"5.1.1"``, or None when it is not a version."""
+    try:
+        return tuple(int(part) for part in str(value).strip().split("."))
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_headless_refusal(version_text: Any, output_path: str | None) -> dict[str, Any] | None:
+    """Refuse a build the installed add-in cannot run unattended, or return None."""
+    needed = _BUILD_HEADLESS_OUTPUT_MIN_VERSION if output_path else _BUILD_HEADLESS_MIN_VERSION
+    version = _parse_addin_version(version_text)
+    if version is not None and version >= needed:
+        return None
+
+    needed_text = ".".join(str(part) for part in needed)
+    if output_path:
+        reason = (
+            f"Building to output_path needs VCS add-in {needed_text} or later "
+            f"(installed: {version_text}). Omit output_path to build to the file "
+            "the source files name, or update the add-in."
+        )
+    else:
+        reason = (
+            f"vcs_rebuild_database needs VCS add-in {needed_text} or later "
+            f"(installed: {version_text})."
+        )
+    return {
+        "success": False,
+        "error": reason,
+        "error_pattern": "addin_version",
+        "output_path": None,
+    }
+
+
+def _create_build_instance() -> Any:
+    """Start a new Access process for one build.
+
+    ``ensure_dispatch`` can return a window the user already has open; the
+    build would open its scratch database there and quit the window when it
+    finished.
+    """
+    import win32com.client
+
+    app = win32com.client.DispatchEx("Access.Application")
+    prefer_full_power_app(app)
+    return app
+
+
+def _open_build_host(app: Any) -> str:
+    """Open a scratch database in ``app`` and return its path.
+
+    ``Application.Run`` into the add-in library with no database open crashes
+    Access, so a full build needs something open to call it from. The build
+    closes this database before it creates the new one.
+    """
+    folder = tempfile.mkdtemp(prefix="vcs-build-host-")
+    path = os.path.join(folder, "BuildHost.accdb")
+    try:
+        app.NewCurrentDatabase(path)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return path
+
+
+async def _remove_build_host(path: str) -> None:
+    """Delete the scratch folder once Access lets go of it.
+
+    ``Quit`` returns before Access releases the file, so the first attempt
+    can fail on a file still in use.
+    """
+    folder = os.path.dirname(path)
+    deadline = time.perf_counter() + _BUILD_HOST_RELEASE_SEC
+    while True:
+        shutil.rmtree(folder, ignore_errors=True)
+        if not os.path.exists(folder) or time.perf_counter() >= deadline:
+            return
+        await asyncio.sleep(0.25)
+
+
+async def _wait_for_build(thread: threading.Thread, timeout: float, ctx: Any) -> None:
+    """Wait for the build thread without blocking the event loop.
+
+    ``BuildHeadless`` reports nothing until it returns, so the client gets a
+    heartbeat instead; without one a long build looks hung.
+    """
+    reporter = MonotonicProgressReporter()
+    start = time.perf_counter()
+    next_beat = start + _BUILD_HEARTBEAT_SEC
+    while thread.is_alive():
+        now = time.perf_counter()
+        if now - start >= timeout:
+            return
+        if now >= next_beat:
+            await reporter.emit(ctx, message=f"Building from source ({now - start:.0f}s)")
+            next_beat = now + _BUILD_HEARTBEAT_SEC
+        await asyncio.sleep(0.5)
+
+
+def _build_headless_result(
+    run_result: dict[str, Any],
+    api_name: str,
+    src_path: Path,
+    output_path: str | None,
+) -> dict[str, Any]:
+    """Turn a finished ``BuildHeadless`` call into a tool result."""
+    if not run_result.get("success"):
+        return {
+            "success": False,
+            "error": _describe_run_failure(run_result.get("error"), api_name, api_name),
+            "output_path": None,
+        }
+
+    raw = run_result.get("result")
+    if isinstance(raw, tuple) and raw:
+        raw = raw[0]
+    if isinstance(raw, str) and raw.startswith(_API_REFUSED_PREFIX):
+        return {
+            "success": False,
+            "error": raw[len(_API_REFUSED_PREFIX):],
+            "output_path": None,
+        }
+
+    result = _addin_json_result(raw)
+    if "databasePath" in result:
+        result["output_path"] = result["databasePath"]
+    else:
+        result.setdefault("output_path", output_path if result.get("success") else None)
+    result["source_dir"] = str(src_path)
+    return result
+
+
 @vcs_tool("vcs_rebuild_database")
 async def vcs_rebuild_database(
     source_dir: str,
-    output_path: str,
+    output_path: str | None = None,
     template_path: str | None = None,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
@@ -1302,35 +1467,38 @@ async def vcs_rebuild_database(
     Creates a fresh database and imports all objects from source.
     Useful for clean builds and distribution.
     
-    This operation supports progress reporting - you'll receive updates
-    as the database is built.
+    Runs the add-in's ``BuildHeadless``, which never prompts and returns when
+    the build is over. Progress notifications are a heartbeat only ("still
+    building"), not per-object progress. The call is bounded by
+    ``ACCESS_VCS_BUILD_TIMEOUT_SEC`` (default 600 seconds).
     
     Examples:
-        # Rebuild from source
-        vcs_rebuild_database("C:\\\\src\\\\mydb", "C:\\\\output\\\\rebuilt.accdb")
+        # Build to the file the source files name
+        vcs_rebuild_database("C:\\\\src\\\\mydb")
         
-        # Rebuild using template
-        vcs_rebuild_database(
-            "C:\\\\src\\\\mydb",
-            "C:\\\\output\\\\rebuilt.accdb",
-            template_path="C:\\\\templates\\\\blank.accdb"
-        )
+        # Build to a different file (add-in 5.1.1 or later)
+        vcs_rebuild_database("C:\\\\src\\\\mydb", "C:\\\\output\\\\rebuilt.accdb")
     
     Args:
         source_dir: Directory containing source files
-        output_path: Path for new database file
-        template_path: Optional template database to start from
+        output_path: Optional path for the new database file. Omit it to build
+            to the file the source files name, which works with any add-in that
+            has ``BuildHeadless`` (5.1.0). A different path needs add-in 5.1.1
+            or later; against an older add-in the call is refused before the
+            build starts.
+        template_path: Accepted for compatibility and ignored; the add-in
+            builds into a new blank database.
     
     Returns:
-        Dictionary with build results, plus ``log_path`` for this run's log
-        and ``log_excerpt`` (tail of the log) on failure.
+        Dictionary with ``success``, ``output_path`` (the file that was built),
+        ``errorCount``, ``warningCount``, ``durationMs``, ``log_path`` for this
+        run's log, and ``log_excerpt`` (tail of the log) on failure. A build
+        refused before it started carries only ``success`` and ``error``.
     
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Build").
     """
     config = get_config()
-    callback_url = get_callback_url()
-    op_manager = _get_operation_manager()
     
     try:
         # Check if writes are disabled
@@ -1346,108 +1514,68 @@ async def vcs_rebuild_database(
             if busy_error:
                 return busy_error
         
-        # We need Access running to call the add-in, but no database is
-        # open yet -- the add-in's build process creates it.  Create a
-        # bare Access instance (no AccessConnection, which requires a
-        # database path) and manage its lifecycle with try/finally.
-        app = ensure_dispatch("Access.Application")
-        prefer_full_power_if_created(app)
-        # The build creates and populates a database in this instance, so any
-        # prompt it raises has to be visible to be answerable.
-        ensure_access_visible(app)
-        
+        # No database exists yet -- the build creates it -- so there is no
+        # AccessConnection; the instance's lifecycle is managed here.
+        app = _create_build_instance()
+        host_path: str | None = None
+        build_running = False
+
         try:
+            host_path = _open_build_host(app)
+            # The build creates and populates a database in this instance, so
+            # whatever it shows has to be visible to be dismissed.
+            ensure_access_visible(app)
+
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=None)
-            
-            # Determine command
-            command = "BuildAs" if output_path else "Build"
-            
-            # Check if async build is available
-            if callback_url and op_manager:
-                # Ensure operation manager uses the correct event loop (FastMCP's loop)
-                op_manager.set_event_loop(asyncio.get_running_loop())
-                
-                # Use async path with progress callbacks
-                operation_id, queue = op_manager.register_operation(
-                    database_path=output_path or str(src_path),
-                    command=command
-                )
-                callback_info = op_manager.create_callback_info(
-                    operation_id, callback_url, "cursor"
-                )
-                
-                try:
-                    completion = None
-                    if command == "Build":
-                        async_result = addin.call_async(callback_info, command, str(src_path))
-                    else:
-                        async_result = addin.call_async(callback_info, command)
-                    
-                    if async_result.get("async"):
-                        timeout_ms = async_result.get("timeout_ms", 600000)  # 10 min for builds
-                        completion = await op_manager.wait_for_completion(
-                            operation_id,
-                            ctx=ctx,
-                            timeout_seconds=timeout_ms / 1000
-                        )
-                        
-                        if not completion.get("success"):
-                            return _attach_log_context({
-                                "success": False,
-                                "error": completion.get("error", "Build failed"),
-                                "output_path": None,
-                            }, src_path, "Build", completion)
-                    elif async_result.get("sync"):
-                        # The add-in already ran the build inline; re-running it
-                        # here would build twice. Fall through and resolve the
-                        # log from disk.
-                        op_manager.unregister_operation(operation_id)
-                    else:
-                        # Neither marker: the add-in never started the operation,
-                        # so run it synchronously rather than reporting success
-                        # for work that never happened.
-                        op_manager.unregister_operation(operation_id)
-                        result = addin.build_from_source(str(src_path), output_path)
-                        if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "output_path": None,
-                            }, src_path, "Build")
-                except Exception as e:
-                    # Async call failed - fall back to sync
-                    completion = None
-                    op_manager.unregister_operation(operation_id)
-                    result = addin.build_from_source(str(src_path), output_path)
-                    if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "output_path": None,
-                        }, src_path, "Build")
-            else:
-                # Use sync path
-                completion = None
-                result = addin.build_from_source(str(src_path), output_path)
-                if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "output_path": None,
-                    }, src_path, "Build")
-            
-            return _attach_log_context({
-                "success": True,
-                "output_path": output_path,
-                "source_dir": str(src_path),
-            }, src_path, "Build", completion)
+
+            refusal = _build_headless_refusal(
+                addin.call_sync("GetVCSVersion"), output_path
+            )
+            if refusal:
+                return refusal
+
+            call_args = ["BuildHeadless", str(src_path)]
+            if output_path:
+                call_args.append(str(output_path))
+            api_name = f"{os.path.splitext(os.path.abspath(addin.addin_path))[0]}.API"
+            timeout = get_build_timeout()
+
+            thread, run_result = _start_application_call(
+                VCSAddinIntegration.worker_app_source(app, None), api_name, call_args
+            )
+            build_running = True
+            await _wait_for_build(thread, timeout, ctx)
+
+            if thread.is_alive():
+                return _attach_log_context({
+                    "success": False,
+                    "error": (
+                        f"Build did not finish within {timeout:g} seconds "
+                        "(ACCESS_VCS_BUILD_TIMEOUT_SEC). It may still be running "
+                        "in the Access window, which is left open."
+                    ),
+                    "error_pattern": "timeout",
+                    "timed_out": True,
+                    "output_path": output_path,
+                    "source_dir": str(src_path),
+                }, src_path, "Build")
+            build_running = False
+
+            return _build_headless_result(
+                run_result, api_name, src_path, output_path
+            )
         finally:
-            try:
-                app.Quit()
-            except Exception:
-                pass
-    
+            # A build still running owns the instance; quitting it from here
+            # would block until the build ends, and the host may still be open.
+            if not build_running:
+                try:
+                    app.Quit()
+                except Exception:
+                    pass
+                if host_path:
+                    await _remove_build_host(host_path)
+
     except PermissionError as e:
         return {
             "success": False,
@@ -2601,17 +2729,41 @@ def _run_application_call_with_timeout(
     The thread needs its own COM apartment and its own proxy. Handing it the caller's
     STA proxy fails before it ever reaches Access -- "CoInitialize has not been called"
     while the thread has no apartment, RPC_E_WRONG_THREAD once it does -- which is what
-    made RebuildAddIn unreachable through this tool. Re-acquiring the instance from the
-    Running Object Table yields an apartment-local proxy, the approach
-    ``VCSAddinIntegration`` already uses for its probe. Marshalling the caller's pointer
-    across instead would serialize the call back onto the calling thread and defeat the
-    timeout this function exists to impose.
+    made RebuildAddIn unreachable through this tool.
+    ``VCSAddinIntegration.worker_app_source`` supplies one: from the Running Object
+    Table with ``db_path``, marshalled from the caller without it.
+    """
+    start = time.perf_counter()
+    thread, result_box = _start_application_call(
+        VCSAddinIntegration.worker_app_source(app, db_path), resolved_name, call_args
+    )
+    thread.join(timeout=timeout_seconds)
+    duration_ms = round((time.perf_counter() - start) * 1000, 2)
 
-    Without ``db_path`` there is nothing to look up, so the caller's proxy is used as
-    before: no worse than it was, and the timeout may simply not fire.
+    if thread.is_alive():
+        return {
+            "success": False,
+            "timed_out": True,
+            "error": f"VBA function call timed out after {timeout_seconds} seconds",
+            "duration_ms": duration_ms,
+        }
+
+    result_box["duration_ms"] = duration_ms
+    return result_box
+
+
+def _start_application_call(
+    acquire_app: Any,
+    resolved_name: str,
+    call_args: list[str],
+) -> tuple[threading.Thread, dict[str, Any]]:
+    """Start ``Application.Run`` on a daemon thread; return it and its result box.
+
+    ``acquire_app`` comes from ``VCSAddinIntegration.worker_app_source``, called on
+    the thread that owns the proxy. The box gets ``success`` and ``result`` or
+    ``error`` once the thread ends.
     """
     result_box: dict[str, Any] = {}
-    start = time.perf_counter()
 
     def worker() -> None:
         import pythoncom
@@ -2619,13 +2771,11 @@ def _run_application_call_with_timeout(
         try:
             pythoncom.CoInitialize()
             try:
-                worker_app = (
-                    VCSAddinIntegration._find_access_in_rot(db_path) if db_path else app
-                )
+                worker_app = acquire_app()
                 if worker_app is None:
                     raise RuntimeError(
-                        f"Cannot find Access instance for {db_path} from the worker "
-                        "thread. The Access application may have been closed."
+                        "Cannot find the Access instance from the worker thread. "
+                        "The Access application may have been closed."
                     )
                 result_box["result"] = worker_app.Run(resolved_name, *call_args)
                 result_box["success"] = True
@@ -2640,19 +2790,7 @@ def _run_application_call_with_timeout(
 
     thread = threading.Thread(target=worker, daemon=True, name="vcs-call-vba")
     thread.start()
-    thread.join(timeout=timeout_seconds)
-    duration_ms = round((time.perf_counter() - start) * 1000, 2)
-
-    if thread.is_alive():
-        return {
-            "success": False,
-            "timed_out": True,
-            "error": f"VBA function call timed out after {timeout_seconds} seconds",
-            "duration_ms": duration_ms,
-        }
-
-    result_box["duration_ms"] = duration_ms
-    return result_box
+    return thread, result_box
 
 
 @vcs_tool("vcs_run_vba")

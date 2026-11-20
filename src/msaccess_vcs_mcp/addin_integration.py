@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
     import pythoncom
@@ -27,6 +27,12 @@ from .usage_logging import log_addin_probe
 # propagate across Application.Run -- it opens a modal dialog and blocks Access.
 # Keep in sync with modAPI.API_REFUSED_PREFIX.
 API_REFUSED_PREFIX = "VCS_API_REFUSED: "
+
+MERGE_NOT_AVAILABLE_MESSAGE = (
+    "Merge not available: this database has no full build or full export to merge "
+    "against. Run a full export (vcs_export_database with full_export=True) or a "
+    "full build (vcs_rebuild_database) first."
+)
 
 
 def _export_failure(result: Any) -> Optional[str]:
@@ -156,10 +162,9 @@ class VCSAddinIntegration:
                   * a fast ``os.path.isfile`` pre-flight catches stale or
                     typo paths in ~1ms instead of burning the full timeout;
                   * the worker thread re-acquires Access via the Running
-                    Object Table for proper cross-apartment timeout
-                    enforcement.  When ``None``, the worker falls back to
-                    sharing the main thread's ``app`` proxy (best-effort
-                    timeout).
+                    Object Table.  When ``None`` (no database open), the
+                    worker gets ``app`` marshalled into its apartment
+                    instead.  See ``worker_app_source``.
         
         Returns:
             True if add-in can be called successfully.
@@ -282,22 +287,13 @@ class VCSAddinIntegration:
         api_function_name = f'{addin_lib_name}.API'
         
         result_box: dict[str, Any] = {}
+        acquire_app = self.worker_app_source(app, db_path)
         
         def worker() -> None:
             try:
                 pythoncom.CoInitialize()
                 try:
-                    # When db_path is known, re-acquire Access via the ROT
-                    # so the worker has its own apartment-local proxy --
-                    # sharing the main thread's STA proxy across apartments
-                    # either fails to marshal or serializes back to the main
-                    # thread (which defeats the timeout).  When db_path is
-                    # None we fall back to the main proxy: best-effort, the
-                    # timeout may not fire reliably but behavior is no
-                    # worse than before.
-                    worker_app = (
-                        self._find_access_in_rot(db_path) if db_path else app
-                    )
+                    worker_app = acquire_app()
                     if worker_app is None:
                         raise RuntimeError(
                             f"Cannot find Access instance for {db_path} "
@@ -404,6 +400,43 @@ class VCSAddinIntegration:
             pass
         
         return None
+
+    @staticmethod
+    def worker_app_source(app, db_path: Optional[str]) -> Callable[[], Any]:
+        """
+        Prepare an Access proxy for a worker thread; return the call that yields it.
+
+        Call this on the thread that owns ``app``, and call the returned function
+        inside the worker, after ``CoInitialize``. A COM proxy belongs to the
+        apartment that created it: used from a worker thread it fails with
+        RPC_E_WRONG_THREAD ("marshalled for a different thread").
+
+        With ``db_path``, the worker finds the instance in the Running Object
+        Table. Without one -- an instance with no database open, such as the
+        one a full build starts in -- the proxy is marshalled across instead.
+        Access runs out of process, so the worker's proxy calls Access directly
+        rather than through the owning thread, and a join timeout on the worker
+        still holds while that thread waits.
+
+        An object that cannot be marshalled (a test double) is handed over as is.
+        """
+        if db_path:
+            return lambda: VCSAddinIntegration._find_access_in_rot(db_path)
+        try:
+            stream = pythoncom.CoMarshalInterThreadInterfaceInStream(
+                pythoncom.IID_IDispatch, app._oleobj_
+            )
+        except Exception:
+            return lambda: app
+
+        def unmarshal():
+            return win32com.client.Dispatch(
+                pythoncom.CoGetInterfaceAndReleaseStream(
+                    stream, pythoncom.IID_IDispatch
+                )
+            )
+
+        return unmarshal
     
     def _call_addin_function(self, function_name: str, *args) -> Any:
         """
@@ -626,7 +659,23 @@ class VCSAddinIntegration:
         source_path = self._get_export_folder(db_path, source_folder)
         
         try:
-            self._call_addin_function("MergeBuild")
+            result = self._call_addin_function("MergeBuild")
+            # False: no full build or full export to merge against. Older add-in
+            # builds return nothing, which is not a failure.
+            if result is False:
+                return {
+                    "success": False,
+                    "database_path": db_path,
+                    "log_path": None,
+                    "message": MERGE_NOT_AVAILABLE_MESSAGE,
+                }
+            if isinstance(result, str) and result.startswith(API_REFUSED_PREFIX):
+                return {
+                    "success": False,
+                    "database_path": db_path,
+                    "log_path": None,
+                    "message": result[len(API_REFUSED_PREFIX):],
+                }
             
             log_path = os.path.join(source_path, "Build.log")
             
@@ -643,50 +692,6 @@ class VCSAddinIntegration:
                 "database_path": db_path,
                 "log_path": None,
                 "message": f"Merge build failed: {e}"
-            }
-    
-    def build_from_source(
-        self,
-        source_folder: str,
-        output_path: Optional[str] = None
-    ) -> dict[str, Any]:
-        """
-        Build database from source files.
-        
-        Creates a fresh database from source files.
-        
-        Args:
-            source_folder: Path to source files folder
-            output_path: Optional path for new database (default: build in place)
-            
-        Returns:
-            Dictionary with build results:
-            - success: Boolean
-            - output_path: Path to built database
-            - log_path: Path to Build.log file
-            - message: Status message
-        """
-        try:
-            # Build always takes an optional source folder argument.
-            # BuildAs is interactive-only (shows file dialogs), so we use
-            # Build for both cases in headless mode.
-            self._call_addin_function("Build", source_folder)
-            
-            log_path = os.path.join(source_folder, "Build.log")
-            
-            return {
-                "success": True,
-                "output_path": output_path,
-                "log_path": log_path if os.path.exists(log_path) else None,
-                "message": "Build from source completed successfully"
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "output_path": None,
-                "log_path": None,
-                "message": f"Build from source failed: {e}"
             }
     
     def parse_log_file(self, log_path: str) -> dict[str, Any]:
@@ -825,7 +830,7 @@ class VCSAddinIntegration:
         # Load the add-in via the lifecycle gate.  Idempotent: if a caller
         # (e.g. validate_components) already loaded it, this is an early
         # return.  db_path=None: get_version_info doesn't have the DB path
-        # in scope, so the probe falls back to the main thread's app proxy.
+        # in scope, so the probe gets ``app`` marshalled into its thread.
         try:
             self.load_addin(app)
         except Exception as load_error:

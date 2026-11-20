@@ -212,7 +212,8 @@ git_commit("Merged changes from team")
 
 **Steps:**
 ```python
-# 1. Build from source files
+# 1. Build from source files (omit the output path to build to the file
+#    the source files name; a different path needs add-in 5.1.1 or later)
 result = vcs_rebuild_database(
     "C:\\mydb.src",
     "C:\\builds\\mydb_v1.0.accdb"
@@ -256,7 +257,7 @@ result = vcs_rebuild_addin(
 The tool derives the development copy beside the source folder. Its callback
 URL and operation ID cross the disconnected worker boundary, so the builder
 Access process emits the same detailed HTTP `Log.Add` / `Log.Progress` stream
-as `vcs_rebuild_database`. The status file remains authoritative for compile,
+as an export or merge. The status file remains authoritative for compile,
 install, terminal failure, and recovery after the builder exits. Rebuilding
 the add-in is a repository operation and belongs to the repository's own copy,
 which closes itself once the worker handoff is confirmed. Do not open a user

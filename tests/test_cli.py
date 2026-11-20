@@ -51,6 +51,12 @@ def test_arguments_for_each_subcommand():
     assert name == "vcs_rebuild_database"
     assert payload["template_path"] == r"C:\blank.accdb"
 
+    rebuild_default = parser.parse_args(["rebuild-database", r"C:\src"])
+    assert arguments_for(rebuild_default) == (
+        "vcs_rebuild_database",
+        {"source_dir": r"C:\src"},
+    )
+
     addin = parser.parse_args(["rebuild-addin", r"C:\src", "--timeout", "90"])
     assert arguments_for(addin) == (
         "vcs_rebuild_addin",

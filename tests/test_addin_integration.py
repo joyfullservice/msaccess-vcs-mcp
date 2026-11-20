@@ -7,7 +7,11 @@ from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 import pytest
 
-from msaccess_vcs_mcp.addin_integration import VCSAddinIntegration
+from msaccess_vcs_mcp import addin_integration
+from msaccess_vcs_mcp.addin_integration import (
+    MERGE_NOT_AVAILABLE_MESSAGE,
+    VCSAddinIntegration,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -276,23 +280,23 @@ class TestVCSAddinIntegration:
         assert "database_path" in result
         mock_app.Run.assert_called()
     
-    def test_build_from_source(self, tmp_path):
-        """Test build from source operation."""
+    def test_merge_build_not_available(self, tmp_path):
+        """MergeBuild returns False when there is nothing to merge against."""
         addin_file = tmp_path / "test_addin.accda"
         addin_file.touch()
-        
+
         addin = VCSAddinIntegration(str(addin_file))
         mock_app = Mock()
-        mock_app.Run = Mock(return_value=None)
-        
+        mock_app.Run = Mock(return_value=False)
+
         addin._app = mock_app
         addin._addin_loaded = True
-        
-        source_folder = str(tmp_path / "source")
-        result = addin.build_from_source(source_folder)
-        
-        assert result["success"] is True
-        mock_app.Run.assert_called()
+
+        result = addin.merge_build(str(tmp_path / "test.accdb"))
+
+        assert result["success"] is False
+        assert result["message"] == MERGE_NOT_AVAILABLE_MESSAGE
+        assert result["log_path"] is None
     
     def test_parse_log_file_exists(self, tmp_path):
         """Test parsing existing log file."""
@@ -434,6 +438,56 @@ class TestLoadAddinProbeTimeout:
         # Should not raise -- the default 10s is plenty for the mock probe.
         result = addin.load_addin(mock_app, db_path=None)
         assert result is True
+
+
+class TestWorkerAppSource:
+    """A worker thread must never be handed the caller's raw COM proxy."""
+
+    def test_db_path_uses_running_object_table(self, monkeypatch):
+        found = object()
+        monkeypatch.setattr(
+            VCSAddinIntegration, "_find_access_in_rot", staticmethod(lambda path: found)
+        )
+
+        acquire = VCSAddinIntegration.worker_app_source(Mock(), "C:\\db.accdb")
+
+        assert acquire() is found
+
+    def test_no_db_path_marshals_the_proxy(self, monkeypatch):
+        """With nothing to look up, the proxy crosses by marshalling."""
+        app = Mock()
+        stream = object()
+        unmarshalled = object()
+        wrapped = object()
+        marshal = Mock(return_value=stream)
+        unmarshal = Mock(return_value=unmarshalled)
+        dispatch = Mock(return_value=wrapped)
+        monkeypatch.setattr(
+            addin_integration.pythoncom, "CoMarshalInterThreadInterfaceInStream", marshal
+        )
+        monkeypatch.setattr(
+            addin_integration.pythoncom, "CoGetInterfaceAndReleaseStream", unmarshal
+        )
+        monkeypatch.setattr(addin_integration.win32com.client, "Dispatch", dispatch)
+
+        acquire = VCSAddinIntegration.worker_app_source(app, None)
+
+        # Marshalled now, on the owning thread; unmarshalled only in the worker.
+        marshal.assert_called_once_with(
+            addin_integration.pythoncom.IID_IDispatch, app._oleobj_
+        )
+        unmarshal.assert_not_called()
+        assert acquire() is wrapped
+        unmarshal.assert_called_once_with(stream, addin_integration.pythoncom.IID_IDispatch)
+        dispatch.assert_called_once_with(unmarshalled)
+
+    def test_unmarshallable_object_is_handed_over(self):
+        """A test double has no real COM pointer to marshal."""
+        app = Mock()
+
+        acquire = VCSAddinIntegration.worker_app_source(app, None)
+
+        assert acquire() is app
 
 
 if __name__ == "__main__":
