@@ -463,20 +463,46 @@ def is_diagnostic_logging_enabled() -> bool:
     return _initialize_diagnostic_logging()
 
 
+def _is_call_tool_result(result: Any) -> bool:
+    return type(result).__name__ == "CallToolResult" and hasattr(result, "content")
+
+
+def _extract_result_dict(result: Any) -> dict[str, Any]:
+    """The metadata dict of a tool result.
+
+    A dict result is its own metadata. A ``CallToolResult`` (tools that
+    return images) carries it as JSON in the first text block.
+    """
+    if isinstance(result, dict):
+        return result
+    if _is_call_tool_result(result):
+        for block in result.content or []:
+            if getattr(block, "type", None) == "text":
+                try:
+                    parsed = json.loads(block.text)
+                except (TypeError, ValueError):
+                    return {}
+                return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def log_tool_call(
     tool_name: str,
     parameters: dict[str, Any],
-    result: dict[str, Any] | None = None,
+    result: Any = None,
     error: str | None = None,
     execution_time_ms: float | None = None,
 ) -> None:
     """
     Log a tool call with its parameters and result.
 
+    Only the outcome is written, never the result body, so image data in a
+    ``CallToolResult`` cannot reach the log.
+
     Args:
         tool_name: Name of the tool called
         parameters: Input parameters (will be truncated if too large)
-        result: Result dictionary (success case)
+        result: Result dictionary or ``CallToolResult`` (success case)
         error: Error message (failure case)
         execution_time_ms: Execution time in milliseconds
     """
@@ -497,10 +523,13 @@ def log_tool_call(
         entry["error"] = _truncate_string(error, max_length=500)
         entry["error_pattern"] = _extract_error_pattern(error)
 
-    if result and isinstance(result, dict) and "error" in result:
+    meta = _extract_result_dict(result)
+    if "error" in meta or meta.get("success") is False:
+        message = str(meta.get("error", ""))
         entry["success"] = False
-        entry["error"] = _truncate_string(str(result.get("error", "")), max_length=500)
-        entry["error_pattern"] = _extract_error_pattern(str(result.get("error", "")))
+        if message:
+            entry["error"] = _truncate_string(message, max_length=500)
+        entry["error_pattern"] = meta.get("error_pattern") or _extract_error_pattern(message)
 
     _write_log_entry(entry)
 
@@ -690,6 +719,9 @@ def with_logging(tool_name: str):
     def _check_serialization(result):
         """Validate result is JSON-serializable, return (result, warning)."""
         if result is None:
+            return result, None
+        # Already validated by pydantic; str() of it would copy any base64 image.
+        if _is_call_tool_result(result):
             return result, None
         try:
             json.dumps(result, default=str)

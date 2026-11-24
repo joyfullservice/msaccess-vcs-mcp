@@ -34,6 +34,13 @@ EXEMPT_TOOLS = frozenset({
     "vcs_get_recent_calls",
     # Launch holds the gate itself; the subsequent status-file wait must not.
     "vcs_rebuild_addin",
+    # Window captures use Win32 only so they work while Access is blocked;
+    # object captures take the gate themselves.
+    "vcs_capture_screenshot",
+    # The call blocked behind a dialog or a break usually holds the gate, and
+    # answering the dialog or resetting the run is what releases it.
+    "vcs_dismiss_dialog",
+    "vcs_reset_vba",
 })
 
 

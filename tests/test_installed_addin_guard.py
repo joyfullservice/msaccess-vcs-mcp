@@ -64,6 +64,8 @@ def _unwrap(tool_callable):
         "vcs_import_object",
         "vcs_diff_database",
         "vcs_list_objects",
+        "vcs_capture_screenshot",
+        "vcs_reset_vba",
     ],
 )
 def test_every_tool_refuses_the_install_as_database_path(tool_name):
@@ -79,6 +81,15 @@ def test_every_tool_refuses_the_install_as_database_path(tool_name):
     assert "database_path" in result["error"]
     # A refusal that does not name the host that works just restates the problem.
     assert "development copy" in result["error"]
+
+
+def test_dismiss_dialog_refuses_the_install_as_database_path():
+    func = _unwrap(tools_module.vcs_dismiss_dialog)
+
+    result = _refusal("vcs_dismiss_dialog", func, "abc", "OK", database_path=INSTALLED_ADDIN)
+
+    assert result is not None
+    assert result["error_pattern"] == "installed_addin_refused"
 
 
 def test_rebuild_output_path_refused():

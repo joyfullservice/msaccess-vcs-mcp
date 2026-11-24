@@ -139,6 +139,18 @@ def test_exempt_tools_include_status_queries():
     assert "vcs_rebuild_addin" in EXEMPT_TOOLS
 
 
+def test_screenshot_tool_is_exempt():
+    """Window captures must work while another call holds the gate; object
+    captures enter the gate themselves."""
+    assert "vcs_capture_screenshot" in EXEMPT_TOOLS
+
+
+def test_dialog_and_reset_tools_are_exempt():
+    """The call stuck behind a dialog or a break holds the gate; these release it."""
+    assert "vcs_dismiss_dialog" in EXEMPT_TOOLS
+    assert "vcs_reset_vba" in EXEMPT_TOOLS
+
+
 def test_com_initializer_runs_for_sync_work():
     gate = AccessGate()
     asyncio.run(gate.run_exclusive("vcs_test", None, lambda: None, False))

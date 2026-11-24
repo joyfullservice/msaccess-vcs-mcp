@@ -318,6 +318,46 @@ full FAIL/ERROR/EMPTY lines. The last stdout line is a human summary such as
 - An all-`EMPTY` result (zero assertions) is a bypassed harness, not a pass
 - A rebuild closes server-owned Access that held the files it replaces, so expect a cold start on the next call
 
+### 6d. See what Access is doing
+
+**Use case:** A call hung or timed out, a compile failed, or you want to check a form's or report's layout.
+
+**Steps:**
+```python
+# 1. Read the dialogs first; no image tokens are spent.
+vcs_capture_screenshot(r"C:\path\to\db.accdb", include_image=False)
+
+# 2. If a dialog is up, its text, buttons, and dialog_id are in "dialogs".
+#    When "owned_by_server" is true, answer it; otherwise ask the user.
+vcs_dismiss_dialog(dialog_id="e5af3021d574", button="No",
+                   database_path=r"C:\path\to\db.accdb")
+
+# 3. If "vbe_state" is "break", code stopped on an error or a Stop.
+#    Answer any error dialog first, then end the run. The result says
+#    where it stopped; the stuck call returns.
+vcs_reset_vba(r"C:\path\to\db.accdb")
+
+# 4. Look at the window when the layout matters.
+vcs_capture_screenshot(r"C:\path\to\db.accdb")
+
+# 5. If a compile error came back without a line, look at the editor.
+vcs_capture_screenshot(r"C:\path\to\db.accdb", target="vbe")
+
+# 6. Capture one object. Without open_if_closed, it must already be open.
+vcs_capture_screenshot(r"C:\path\to\db.accdb", target="object",
+                       object_type="form", object_name="frmExample",
+                       open_if_closed=True)
+```
+
+**Tips:**
+- `application` and `vbe` captures work while Access is blocked or another call holds the server; `active` and `object` refuse with `access_blocked` or `server_busy` and return the application capture instead
+- `vcs_dismiss_dialog` and `vcs_reset_vba` act only on Access windows this server opened (`user_owned_instance` otherwise), and also work while another call is stuck
+- `vcs_compile_vba` returns `compile_error` with the module, line, and code of the first error; fix it, import, and compile again
+- With several Access windows open, pass `database_path` or `pid`; `ambiguous_instance` lists the candidates
+- `open_if_closed=True` runs the object's open events; reports open in print preview, tables and queries read-only, and action queries are refused
+- Minimized or hidden windows cannot be captured; the tool never restores or focuses a window, so ask the user to
+- Screenshots can show client data. They are returned inline and never saved
+
 ### 7. Iterative Development Cycle
 
 **Use case:** Rapid development with frequent testing

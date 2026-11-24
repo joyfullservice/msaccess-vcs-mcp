@@ -54,6 +54,11 @@ msaccess-vcs-mcp/
 │   ├── addin_integration.py    # COM calls to VCS add-in
 │   ├── operation_manager.py    # Async operation queues
 │   ├── callback_server.py      # HTTP callback server for VBA progress
+│   ├── screen_capture.py       # Win32 window capture, dialog text, PNG encoding
+│   ├── screenshot.py           # vcs_capture_screenshot targets, gate, COM object path
+│   ├── accessibility.py        # MSAA read and press for Office dialogs (raw ctypes)
+│   ├── vba_control.py          # vcs_dismiss_dialog, vcs_reset_vba, code location
+│   ├── compile_check.py        # Editor-side compile that reports the failing line
 │   └── access_com/             # Low-level COM/DAO helpers
 ├── tests/                      # pytest test suite
 ├── docs/                       # Extended documentation
@@ -107,6 +112,8 @@ Key variables:
 - `ACCESS_VCS_CALL_VBA_TIMEOUT_SEC` — parent-side timeout for `vcs_call_vba` `Application.Run` calls (default 45s)
 - `ACCESS_VCS_BUILD_TIMEOUT_SEC` — how long `vcs_rebuild_database` waits for the add-in's `BuildHeadless` to return (default 600s); on timeout Access is left open
 - `ACCESS_VCS_REBUILD_TIMEOUT_SEC` — how long `vcs_rebuild_addin` waits after launch for a terminal status (default 1200s)
+- `ACCESS_VCS_SCREENSHOT_OPEN_TIMEOUT_SEC` — how long `vcs_capture_screenshot` waits for an `open_if_closed` open before returning `open_blocked` (default 10s)
+- `ACCESS_VCS_COMPILE_TIMEOUT_SEC` — how long `vcs_compile_vba` waits for the editor's compile to succeed or show its error before returning `compile_timeout` (default 120s)
 - `ACCESS_VCS_BUSY_WAIT_SEC` — how long a second tool call waits for the Access gate before returning `server_busy` (default 15s)
 - `ACCESS_VCS_RECOVERY_PROBE_TIMEOUT_SEC` — timeout for automatic Access/add-in recovery probes after a VBA timeout or COM disconnect (default 10s)
 - `ACCESS_VCS_LEAVE_ACCESS_OPEN` — when `true` (the default), a COM-created Access instance is not Quit on disconnect so a later attach can reuse the boosted process. The user closes the window. Set `false` to restore quit-per-call. The server still closes instances it created when a rebuild must replace a file they hold, or when recycling a stuck owned instance after a failed recovery probe. User-owned Access is never closed.
@@ -192,6 +199,30 @@ The comparison ignores the file extension, mirroring the add-in's `modInstall.Pa
 **Resolving the install path.** With `ACCESS_VCS_ADDIN_PATH` unset, `get_default_addin_path()` reads `HKCU\Software\VB and VBA Program Settings\MSAccessVCS\Install`, which is the only place to read it from — the add-in's own `GetInstalledAddInFileName` is built from exactly these two values. `Install Folder` is present only for a folder the user chose (the installer deletes it when the folder is the default, so absence means `%AppData%\MSAccessVCS`, not "not installed"), and `Compile accde` decides the extension. Do not reconstruct the path from `%AppData%` alone or assume `.accda`. The result is cached for the life of the process; `reset_addin_path_cache()` clears it.
 
 Run these tests **through this server**, never from the add-in's own window. `modTestAssert.TestAssert` routes through `Application.Run` to the *installed* add-in path, while the runner singleton that records assertions lives in whichever project received `RunTests`. Invoking them from a development copy puts those in different projects: assertions are discarded and every test reports `EMPTY`. Treat an all-`EMPTY` result as a broken harness, not a pass.
+
+### Screenshots
+
+`vcs_capture_screenshot` returns a PNG of the Access window (`target="application"`), the VBA editor (`"vbe"`), the active object (`"active"`), or a named form, report, table, or query (`"object"`), with a JSON metadata block in front of it. The metadata carries the text, buttons, and `dialog_id` of every dialog Access is showing, `vbe_state` (`break`, `running`, `design`, read from the editor's title), and `owned_by_server`, so `include_image=False` is the cheap first call when Access seems stuck. Win32 capture lives in `screen_capture.py`; target resolution, the gate, and the COM object path live in `screenshot.py`.
+
+- **Office dialogs are read through MSAA.** `NUIDialog` windows ("Cannot Compile Project.") have no child controls, so window calls find nothing. `accessibility.py` walks their accessibility tree with raw ctypes `IAccessible` calls (pywin32 cannot hand `AccessibleChildren` a raw pointer), only for a window that answers messages, on a worker with a deadline. `text_source` says which reader produced the text.
+
+- **Window captures never touch COM or the gate.** The tool is in `EXEMPT_TOOLS`, and the `application` and `vbe` paths use only Win32 calls (on a worker thread, under a timeout), so they work while Access sits on a MsgBox, in break mode, or inside another tool's long call. Do not add a COM call to those paths; a blocked Access would hang them.
+- **Object captures take the gate themselves** with `run_exclusive(..., is_async=False)`, so the COM work runs on the apartment thread. A Win32 precheck refuses with `access_blocked` before any COM when a dialog is up or VBA is in break mode, and an immediate `server_busy` check avoids waiting on another call. Both return the application capture instead.
+- **The instance is found without COM.** In order: the `pid` argument, the Restart Manager (which process holds the file), the ownership registry, the window title, and the single running instance when no `database_path` is given. Several candidates give `ambiguous_instance` with the list.
+- **The tool never changes window state.** It does not restore, focus, show, or close a window, and never clicks a dialog button. `open_if_closed=True` opens a closed object (reports in print preview, tables and queries read-only, only select, crosstab, and union queries) and closes it with `acSaveNo`; if the open times out (`open_blocked`, usually an Open event showing a dialog), the abandoned worker closes the object once the open finishes, and object captures for that database refuse with `cleanup_pending` until it has.
+- **A responsive window is rendered with `PrintWindow`;** a hung one is copied from the screen (`capture_method: "screen"`, with `occluded` when another window covers it). In that copy every other application's window above Access is grayed out, applied bottom to top so an Access dialog above a foreign window keeps its pixels. Dialogs owned by Access are composited onto the image only when they touch the captured window; one on another monitor stays in `dialogs` with a warning rather than stretching the canvas.
+- **Images are returned inline only, never written to disk.** The result is a `CallToolResult` (text then image, no output schema); `usage_logging` reads its outcome from the first text block and never logs the content.
+
+
+`ACCESS_VCS_SCREENSHOT_OPEN_TIMEOUT_SEC` (default 10s) bounds the `open_if_closed` open.
+
+### Dialogs and break mode
+
+The screenshot tool never clicks. Two separate tools act on what it reports, and only on Access windows **the server created**: `server_owns` requires a confirmed PID plus creation-time match in the ownership registry, the same proof that decides which windows the server may close. A user's Access is refused with `user_owned_instance`, and the guidance says to ask the user. Both tools are refused when `ACCESS_VCS_DISABLE_WRITES` is set, and both are in `EXEMPT_TOOLS`: the call stuck behind the dialog or the break usually holds the gate, and answering it is what releases the gate.
+
+- **`vcs_dismiss_dialog(dialog_id, button)` clicks only the dialog the agent read.** `dialog_id` is a hash of the window handle, class, title, text, and buttons; if any of them changed, the call is refused with `dialog_changed` and the current `dialogs`. Standard dialogs get a posted `BM_CLICK` (posted, so a busy Access cannot block the caller); Office dialogs get the MSAA default action. The usage log records the title, button, and `dialog_id`, never the dialog text.
+- **`vcs_reset_vba()` needs `vbe_state == "break"`.** On its own COM thread with a deadline (Access still answers COM in break mode), it reads the break location from `VBE.ActiveCodePane`, then runs `CommandBars.FindControl(1, 228)` (Reset). Pass the arguments positionally: win32com ignores `Id=` as a keyword and returns the first control ("&File").
+- **`vcs_compile_vba` compiles from the editor** (`FindControl(1, 578)`) in `compile_check.py`, not with `acCmdCompileAllModules`. The Access command shows "Cannot Compile Project.", blocks until someone clicks OK, and never moves to the error. The editor command returns at once; about two seconds later the editor shows itself, highlights the error, and opens a standard "Compile error:" dialog. The gate thread watches for that dialog with window calls only, because a COM call issued while it is up waits behind it. Success is asked on a separate COM thread (`IsCompiled`, through a marshaled proxy). Before clicking OK the tool records the message and the module from the code window title; after OK it reads the line, columns, and code from the code pane (`location_source: "editor"`), falling back to the title alone (`"window"`). It clicks only the editor's own compile dialog; any other dialog returns `dialog_shown`. The add-in's `CompileVBA` remains the fallback when the editor has no compile control.
 
 ## Logging
 

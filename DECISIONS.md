@@ -74,6 +74,73 @@ contradictory guidance.
 
 ---
 
+## 2026-11-24 — Answer dialogs and reset break mode only on server-created Access
+
+**Trigger**: Screenshots made dialogs and break mode visible to agents, but
+an agent still had to stop and ask the user to click OK or press Reset before
+any autonomous work could continue.
+
+**Options explored**:
+- Let `vcs_capture_screenshot` click buttons: rejected. It would no longer be
+  a read-only tool, and an agent asking "what is Access doing?" could change
+  what Access does next.
+- Allow dismissal on user-owned Access behind an opt-in setting: rejected
+  for now. A user's window may hold unsaved work or a deliberate debugging
+  session, and a process list cannot tell an agent whose window it is.
+- Click by title or button caption alone: rejected. The dialog may have
+  been answered and replaced between the screenshot and the click; a `Yes`
+  meant for one prompt would land on the next.
+- **Chosen**: separate `vcs_dismiss_dialog` and `vcs_reset_vba`, limited to
+  instances with a confirmed PID plus creation-time match in the ownership
+  registry, refused when writes are disabled, and gate-exempt because the
+  stuck call holds the gate. A dismiss must quote the `dialog_id` (a hash of
+  the window handle, title, text, and buttons) it read.
+
+**Decision**: Owned instances only, with a content fingerprint as the click
+guard. The cost is that a user's own Access still needs the user.
+
+**What this rules out**: Clicking dialogs in a window the server did not
+create. Revisit if users ask for unattended work in their own window; that
+would need an explicit per-session opt-in, not a default.
+
+**Relevant files**: `src/msaccess_vcs_mcp/vba_control.py`,
+`src/msaccess_vcs_mcp/accessibility.py`, `src/msaccess_vcs_mcp/access_gate.py`
+
+---
+
+## 2026-11-24 — Compile from the VBA editor to report the failing line
+
+**Trigger**: `vcs_compile_vba` returned only success or failure, and agents
+were told to ask the user to compile by hand and paste the error line.
+
+**Options explored**:
+- Keep the add-in's `CompileVBA` (`acCmdCompileAllModules`): it shows
+  Office's "Cannot Compile Project." dialog, blocks the caller until someone
+  clicks OK, and never moves to the error, so there is no location to read.
+- Read the location from a screenshot alone: the code window title gives
+  the module, and the image shows the highlighted line, but window calls
+  cannot read a line number from the custom-drawn code pane.
+- **Chosen**: run the editor's own Compile control (578) over COM. It
+  returns at once, then the editor highlights the error and shows a
+  standard "Compile error:" dialog. The gate thread waits for that dialog
+  with window calls only (a COM call made while it is up waits behind it),
+  records the message and the module from the window title, clicks OK, and
+  reads the line and code from `ActiveCodePane` over COM. Success is
+  detected by polling `IsCompiled` on a separate COM thread.
+
+**Decision**: Editor-side compile with two sources of evidence: window
+evidence while the dialog is up, and the exact selection afterwards. The
+add-in route stays as a fallback when the control is missing.
+
+**What this rules out**: Compiling through `acCmdCompileAllModules` from
+the server. The editor is left open on the error, which is visible to the
+user; revisit if that proves disruptive.
+
+**Relevant files**: `src/msaccess_vcs_mcp/compile_check.py`,
+`src/msaccess_vcs_mcp/tools.py`
+
+---
+
 ## 2026-11-20 — Cancel by add-in poll; every long tool keeps the event loop free
 
 **Trigger**: An operation started by automation could not be stopped: the

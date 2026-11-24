@@ -275,6 +275,83 @@ class TestLogToolCall:
         entry = json.loads(lines[-1])
         assert entry["success"] is False
 
+    def test_result_error_pattern_preferred(self, tmp_path):
+        """A tool's own error_pattern beats the pattern guessed from the message."""
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_tool_call(
+                tool_name="vcs_capture_screenshot",
+                parameters={},
+                result={"success": False, "error": "timed out", "error_pattern": "open_blocked"},
+            )
+
+        entry = json.loads((log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")[-1])
+        assert entry["error_pattern"] == "open_blocked"
+
+    def test_call_tool_result_outcome_logged_without_image(self, tmp_path):
+        """Image results log the outcome from their text block, never the image."""
+        from mcp.server.fastmcp import Image
+        from mcp.types import CallToolResult, TextContent
+
+        meta = {"success": False, "error": "Access is blocked", "error_pattern": "access_blocked"}
+        png = b"\x89PNG\r\n\x1a\n" + b"IMAGEBYTES" * 50
+        image = Image(data=png, format="png").to_image_content()
+        result = CallToolResult(content=[TextContent(type="text", text=json.dumps(meta)), image])
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_tool_call(tool_name="vcs_capture_screenshot", parameters={}, result=result)
+
+        text = (log_dir / "vcs-mcp-usage.jsonl").read_text()
+        entry = json.loads(text.strip().split("\n")[-1])
+        assert entry["success"] is False
+        assert entry["error_pattern"] == "access_blocked"
+        assert image.data not in text
+
+    def test_successful_call_tool_result(self, tmp_path):
+        from mcp.types import CallToolResult, TextContent
+
+        result = CallToolResult(content=[TextContent(type="text", text='{"success": true}')])
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            _initialize_logging()
+            log_tool_call(tool_name="vcs_capture_screenshot", parameters={}, result=result)
+
+        entry = json.loads((log_dir / "vcs-mcp-usage.jsonl").read_text().strip().split("\n")[-1])
+        assert entry["success"] is True
+
+    def test_with_logging_passes_call_tool_result_through(self, tmp_path):
+        """The serialization check must not stringify (or replace) an image result."""
+        import asyncio
+
+        from mcp.types import CallToolResult, TextContent
+
+        expected = CallToolResult(content=[TextContent(type="text", text='{"success": true}')])
+        log_dir = tmp_path / "logs"
+        with patch.dict(
+            os.environ,
+            {"ACCESS_VCS_ENABLE_LOGGING": "true", "ACCESS_VCS_LOG_DIR": str(log_dir)},
+            clear=False,
+        ):
+            @with_logging("vcs_capture_screenshot")
+            async def tool() -> CallToolResult:
+                return expected
+
+            assert asyncio.run(tool()) is expected
+
 
 class TestSanitizeParameters:
     """Tests for parameter sanitization."""

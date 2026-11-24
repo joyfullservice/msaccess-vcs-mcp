@@ -38,10 +38,11 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import CallToolResult
 
 from .access_com.connection import (
     AccessConnection,
@@ -82,21 +83,28 @@ from .rebuild_watcher import (
     wait_for_rebuild_status,
 )
 from .operation_manager import MonotonicProgressReporter
+from . import screenshot as _screenshot
 from .vba_worker_manager import get_build_timeout, get_call_vba_timeout, run_vba_resilient
 
 _COMPILE_FAILURE_AGENT_GUIDANCE = (
-    "Compilation failed. MCP cannot report the failing module or line. "
-    "Stop editing source files. Ask the user to compile in the VBE "
-    "(Debug → Compile) — Access will jump to the error line. "
-    "Ask the user to paste the code snippet around that line (a few lines "
-    "above and below). Do not guess fixes or iterate blindly."
+    "Compilation failed and the failing line could not be read. "
+    "Call vcs_capture_screenshot(database_path, target=\"vbe\"): the editor "
+    "highlights the error. If that does not show it, stop editing source "
+    "files and ask the user to compile in the VBE (Debug → Compile) and paste "
+    "the code around the error line. Do not guess fixes or iterate blindly."
+)
+
+_COMPILE_ERROR_LOCATED_GUIDANCE = (
+    "Compilation stopped at the error in `compile_error` (module, line, and "
+    "code). Fix that line in the source file, import it, and run "
+    "vcs_compile_vba again. The compiler stops at the first error, so others "
+    "may follow."
 )
 
 _NOT_COMPILED_AGENT_GUIDANCE = (
-    "The VBA project is not compiled. MCP cannot report the failing module or line. "
-    "Before proceeding with code edits, ask the user to compile in the VBE "
-    "(Debug → Compile) and paste the code snippet around any error line, "
-    "or confirm the project compiles cleanly."
+    "The VBA project is not compiled. Run vcs_compile_vba before editing code: "
+    "it compiles and, on an error, returns the failing module, line, and code "
+    "in `compile_error`."
 )
 
 
@@ -431,12 +439,18 @@ mcp = FastMCP(
         "it. The comparison ignores the file extension, because a compiled install is a "
         "`.accde` built from the same `.accda`.\n\n"
         "**VBA compile failures:**\n"
-        "MCP compile tools return success/failure only — not the failing module or line. "
-        "When vcs_compile_vba returns success=false (or vcs_check_vba_compiled shows "
-        "compiled=false), stop editing source files. Ask the user to compile in the VBE "
-        "(Debug → Compile); Access navigates to the error line. Wait for the user to "
-        "paste the code snippet around that line before proposing a fix. Do not guess "
-        "or iterate through speculative edits.\n\n"
+        "vcs_compile_vba compiles from the VBA editor and, on an error, returns the "
+        "failing module, line, and code in `compile_error`. Fix that line in source, "
+        "import it, and compile again. If no line is reported, call "
+        "vcs_capture_screenshot(database_path, target=\"vbe\") to see the editor.\n\n"
+        "**Access seems stuck, or a call timed out:**\n"
+        "Call vcs_capture_screenshot(database_path, include_image=False) first. It returns "
+        "the text of every dialog Access is showing (MsgBox, compile error, prompt) "
+        "without any image tokens, and works while Access is blocked or another call "
+        "holds the gate. Call it again with the image when the layout matters; "
+        "target=\"vbe\" shows the VBA editor (module, highlighted line, break mode). "
+        "vcs_dismiss_dialog and vcs_reset_vba answer dialogs and end break mode in "
+        "windows this server created; for the user's windows, ask the user.\n\n"
         "**Tool quick-reference (required parameters marked with *, optional with ?):**\n"
         "- vcs_get_version_info() — server, add-in, and Access version info\n"
         "- vcs_list_objects(database_path*) — list all objects by type\n"
@@ -469,6 +483,13 @@ mcp = FastMCP(
         "- vcs_set_option(database_path*, option_name*, value*) "
         "— set a VCS option for this session\n"
         "- vcs_get_log(database_path*, log_type?) — read Export or Build log\n"
+        "- vcs_capture_screenshot(database_path?, target?, object_type?, object_name?, "
+        "open_if_closed?, pid?, max_dimension?, include_image?) — PNG of the Access "
+        "window, VBA editor, active object, or a named object, plus dialog text\n"
+        "- vcs_dismiss_dialog(dialog_id*, button*, database_path?, pid?) — click a "
+        "button on a dialog in a server-created Access window\n"
+        "- vcs_reset_vba(database_path?, pid?) — end VBA break mode in a "
+        "server-created Access window\n"
         "- vcs_get_recent_calls(limit?) — recent tool_call entries from the usage log\n"
         "- vcs_end_session(database_path*) — end session, remove option overrides\n"
         "- vcs_cancel_operation(operation_id?, database_path?) — cancel a running export, import, rebuild, or test run (no args: the only one running)\n\n"
@@ -2331,40 +2352,31 @@ def vcs_compile_vba(
     """
     Compile all VBA modules in an Access database and return success status.
     
-    Attempts to compile all VBA code in the database. Returns True if compilation
-    succeeded (project is compiled), False if compilation failed.
-    
-    MCP cannot report the failing module or line. When compilation fails:
-    
-    1. **Stop** — do not import more changes, edit `.bas`/`.cls` files
-       speculatively, or run trial-and-error fixes.
-    2. **Ask the user** to open the database in Access, open the VBE, and run
-       **Debug → Compile** (toolbar compile button). Access highlights the
-       first error line.
-    3. **Ask the user** to paste the code snippet around that line (±5 lines
-       is enough; full error text is optional).
-    4. **Then** fix the identified issue in source and re-import / re-compile.
-    
-    Examples:
-        # Compile VBA code
-        result = vcs_compile_vba("C:\\\\db.accdb", suppress_warnings=True)
-        if result["success"]:
-            print("Compilation successful!")
-        else:
-            print(result["agent_guidance"])
-    
+    Compiles from the VBA editor, the same as Debug → Compile. On an error
+    the editor moves to the failing line; the tool reads it, dismisses the
+    "Compile error" dialog, and returns the location in ``compile_error``.
+    The editor is left open on the error.
+
+    When compilation fails, fix the reported line in source, import it, and
+    compile again. If ``compile_error`` has no ``line`` (only the module from
+    the editor's window title), take a screenshot with target="vbe".
+
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
         suppress_warnings: If True, suppress message boxes during compilation.
                          Warning: If code crashes, warnings may remain disabled.
-    
+
     Returns:
         Dictionary with:
-        - success: Boolean - True if compilation succeeded (project is compiled),
-                  False if compilation failed
-        - agent_guidance: Present when success is False — stop and hand off to
-          the user via VBE compile before editing source
-        - error: Error message if compilation check failed
+        - success: True if the project is compiled
+        - compile_error: On failure, ``message`` ("Compile error: Variable not
+          defined"), ``module``, ``line``, ``start_column``, ``end_line``,
+          ``end_column``, ``code``, ``context`` (nearby lines), and
+          ``location_source`` ("editor" from the code pane, "window" from
+          the window title only)
+        - agent_guidance: Present when success is False
+        - error / error_pattern: when the compile could not run or finish
+          (``dialog_shown``: another dialog appeared; see ``dialogs``)
     """
     try:
         # Validate path
@@ -2374,6 +2386,28 @@ def vcs_compile_vba(
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
             
+            from . import compile_check
+            from .access_com.process_qos import pid_from_access_app
+
+            access_pid = pid_from_access_app(app)
+            located = None
+            if access_pid:
+                if suppress_warnings:
+                    app.DoCmd.SetWarnings(False)
+                try:
+                    located = compile_check.compile_with_location(app, access_pid)
+                finally:
+                    if suppress_warnings:
+                        app.DoCmd.SetWarnings(True)
+            if located is not None:
+                if not located.get("success"):
+                    error = located.get("compile_error") or {}
+                    located["agent_guidance"] = (
+                        _COMPILE_ERROR_LOCATED_GUIDANCE if error.get("line")
+                        else _COMPILE_FAILURE_AGENT_GUIDANCE
+                    )
+                return located
+
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
@@ -3430,6 +3464,195 @@ async def vcs_run_tests(
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@vcs_tool("vcs_capture_screenshot")
+async def vcs_capture_screenshot(
+    database_path: str | None = None,
+    target: Literal["application", "vbe", "active", "object"] = "application",
+    object_type: Literal["form", "report", "table", "query"] | None = None,
+    object_name: str | None = None,
+    open_if_closed: bool = False,
+    pid: int | None = None,
+    max_dimension: int = _screenshot.DEFAULT_MAX_DIMENSION,
+    include_image: bool = True,
+) -> CallToolResult:
+    """
+    Capture a PNG of a running Access window, plus the text of its dialogs.
+
+    Use it to see what Access is doing: when a call hung or timed out, when
+    Access may be waiting on a MsgBox or prompt, after a compile failure
+    (target="vbe" shows the module and highlighted line), or to check a
+    form's or report's layout. Read ``dialogs`` in the metadata before the
+    image: it carries each dialog's text and button captions.
+
+    Targets:
+    - "application": the Access main window, with its dialogs and popups.
+    - "vbe": the VBA editor window.
+    - "active": the active form, report, or datasheet (needs database_path).
+    - "object": a named form, report, table, or query (needs database_path,
+      object_type, and object_name).
+
+    "application" and "vbe" use Windows APIs only. They never call into
+    Access or wait for other tool calls, so they work while Access sits on a
+    dialog, in break mode, or inside a long call. "active" and "object" ask
+    Access for the object's window; they refuse (``access_blocked``) when
+    Access is showing a dialog, and return the application capture instead.
+
+    Each dialog carries a ``dialog_id``. When ``owned_by_server`` is true,
+    pass it to vcs_dismiss_dialog to answer the dialog; ``vbe_state: "break"``
+    means vcs_reset_vba can end a run stopped in break mode.
+
+    The tool never starts Access, opens a database, restores, focuses, or
+    closes a window, or clicks a dialog button. With
+    ``open_if_closed=True`` it opens a closed object for the capture and
+    closes it without saving. Opening runs the object's event code. Reports
+    open in print preview; tables and queries open read-only; only select,
+    crosstab, and union queries are opened.
+
+    Args:
+        database_path: Database whose Access window to capture. Optional for
+            "application" and "vbe" when only one Access is running or pid
+            is given.
+        target: "application" (default), "vbe", "active", or "object".
+        object_type: "form", "report", "table", or "query" (target="object").
+        object_name: Object name (target="object").
+        open_if_closed: Open a closed object for the capture, then close it.
+        pid: MSACCESS.EXE process id, to pick one of several instances.
+        max_dimension: Longest image edge in pixels (320-3840). Images are
+            scaled down, never up.
+        include_image: False returns the metadata and dialog text only.
+
+    Returns:
+        A JSON metadata block (``success``, ``pid``, ``owned_by_server``,
+        ``window``, ``vbe_state``, ``dialogs``, ``modal_blocked``, ``image``,
+        ``warnings``; ``error`` and ``error_pattern`` on failure) followed by
+        the PNG when one was taken.
+
+    Limits: minimized, hidden, or cloaked windows cannot be captured. A window
+    that does not answer messages is copied from the screen instead
+    (``capture_method: "screen"``), with other applications' windows grayed out.
+    With ``Application.Echo False`` the capture shows a stale frame. Captures
+    can show client data; they are returned inline and never saved to disk.
+    """
+    if database_path:
+        try:
+            database_path = str(validate_database_path(database_path))
+        except ValueError as exc:
+            return _screenshot.error_result("invalid_argument", str(exc), target=target)
+    return await _screenshot.capture_screenshot(
+        database_path=database_path,
+        target=target,
+        object_type=object_type,
+        object_name=object_name,
+        open_if_closed=open_if_closed,
+        pid=pid,
+        max_dimension=max_dimension,
+        include_image=include_image,
+        get_gate=get_access_gate,
+    )
+
+
+async def _run_blocking(fn: Any, timeout: float) -> dict[str, Any]:
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fn), timeout)
+    except asyncio.TimeoutError:
+        return {
+            "success": False,
+            "error": f"The call did not finish within {timeout:.0f} s.",
+            "error_pattern": "access_unresponsive",
+            "recoverable": True,
+        }
+
+
+def _optional_database(database_path: str | None) -> str | None:
+    return str(validate_database_path(database_path)) if database_path else None
+
+
+@vcs_tool("vcs_dismiss_dialog")
+async def vcs_dismiss_dialog(
+    dialog_id: str,
+    button: str,
+    database_path: str | None = None,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """
+    Click a button on a dialog that a server-created Access window is showing.
+
+    Call vcs_capture_screenshot first (include_image=False is enough): pass
+    a ``dialog_id`` and one of the ``buttons`` it lists. The click goes only
+    to that dialog. If it was answered or replaced since the screenshot,
+    the call is refused with ``dialog_changed`` and returns the current
+    ``dialogs``.
+
+    Works while another tool call is blocked behind the dialog; it does not
+    wait for the Access gate. Refused (``user_owned_instance``) for Access
+    windows this server did not open: ask the user to answer those.
+    Refused when ACCESS_VCS_DISABLE_WRITES is set.
+
+    Args:
+        dialog_id: The dialog's ``dialog_id`` from vcs_capture_screenshot.
+        button: A button caption as listed, for example "OK" or "No".
+        database_path: Database whose Access window shows the dialog.
+        pid: MSACCESS.EXE process id, instead of or with database_path.
+
+    Returns:
+        ``success``, ``pid``, ``dismissed`` (dialog_id, title, button),
+        ``closed``, the ``dialogs`` still showing, and ``vbe_state`` (a
+        dismissed error can leave VBA in break mode).
+    """
+    from . import vba_control
+
+    try:
+        check_write_permission(get_config())
+        database_path = _optional_database(database_path)
+    except (PermissionError, ValueError) as exc:
+        pattern = "write_disabled" if isinstance(exc, PermissionError) else "invalid_argument"
+        return {"success": False, "error": str(exc), "error_pattern": pattern}
+    return await _run_blocking(
+        lambda: vba_control.dismiss_dialog(database_path, pid, dialog_id, button), 20.0
+    )
+
+
+@vcs_tool("vcs_reset_vba")
+async def vcs_reset_vba(
+    database_path: str | None = None,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """
+    End VBA break mode in a server-created Access window, reporting where it stopped.
+
+    Use when vcs_capture_screenshot reports ``vbe_state: "break"``: code
+    stopped on a run-time error or a Stop statement, and every call into
+    Access waits behind it. Answer any error dialog with vcs_dismiss_dialog
+    first. The reset reads the module, line, and code where execution
+    stopped, then runs the VBA editor's Reset command, which ends the run
+    and clears module-level variables. The blocked tool call then returns.
+
+    Does not wait for the Access gate. Refused (``user_owned_instance``) for
+    Access windows this server did not open, and when
+    ACCESS_VCS_DISABLE_WRITES is set.
+
+    Args:
+        database_path: Database open in the Access window in break mode.
+        pid: MSACCESS.EXE process id, instead of or with database_path.
+
+    Returns:
+        ``success``, ``pid``, ``stopped_at`` (module, line, start_column,
+        end_line, end_column, code, context), and ``vbe_state``.
+    """
+    from . import vba_control
+
+    try:
+        check_write_permission(get_config())
+        database_path = _optional_database(database_path)
+    except (PermissionError, ValueError) as exc:
+        pattern = "write_disabled" if isinstance(exc, PermissionError) else "invalid_argument"
+        return {"success": False, "error": str(exc), "error_pattern": pattern}
+    return await _run_blocking(
+        lambda: vba_control.reset_vba(database_path, pid),
+        vba_control.RESET_TIMEOUT_SEC + vba_control.RESET_SETTLE_SEC + 10.0,
+    )
 
 
 @vcs_tool("vcs_end_session")
