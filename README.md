@@ -252,7 +252,9 @@ Import objects from source files into Access database using merge build.
 
 With no `object_types`, runs a full project merge. With `object_types`, merges
 only those categories (orphan reconciliation within them; no database backup).
-Requires write permission.
+Requires write permission. When another Access session or another computer has
+the database open, the result's `warnings` says so: design and VBA changes may
+not save. The import still runs.
 
 **Args:**
 - `database_path`: Path to Access database
@@ -360,7 +362,7 @@ vcs_export_object("C:\\db.accdb", "module", "modUtils")
 
 #### `vcs_import_object(database_path, object_type, object_name)`
 
-Import a single named object from source files into the database. The source file must exist in the project's export folder. Requires write permission.
+Import a single named object from source files into the database. The source file must exist in the project's export folder. Requires write permission. Like `vcs_import_objects`, it warns when another session has the database open.
 
 **Args:**
 - `database_path`: Path to Access database
@@ -412,7 +414,7 @@ Execute agent-generated VBA code in a temporary module.
 
 The add-in handles the full lifecycle: creates a temp module, wraps the code in a function with error handling, compiles the project to validate, executes, captures the result, removes the temp module, and returns structured JSON.
 
-**Requires `McpAllowRunVBA` option to be enabled** (default: off). The user must enable this manually in the VCS Options form — agents cannot set this option programmatically.
+**Requires `McpAllowRunVBA` option to be enabled** (default: off). The user must enable this in the add-in's MCP options form; no tool can change it.
 
 **Args:**
 - `database_path`: Path to Access database
@@ -492,6 +494,14 @@ vcs_get_option("C:\\db.accdb", "McpAllowRunVBA")
 ```
 
 ### Diagnostics
+
+#### `vcs_tips(topic?)`
+
+Situational guidance for agents: `addin-development`, `stuck`, `compile`, `logs`, and `run-vba`. With no topic it lists them; an unknown topic is matched against the topic text. It reads packaged text only, so it answers while Access is blocked. The server instructions stay short (Claude Code cuts them at 4,096 characters) and point here, and failed results carry an `agent_guidance` sentence naming the next call.
+
+```python
+vcs_tips("stuck")
+```
 
 #### `vcs_get_version_info()`
 
@@ -718,7 +728,7 @@ If the MCP server doesn't load:
 
 ### Write Operations
 
-Database write operations (import, rebuild, run VBA) are **enabled by default**. To prevent modifications:
+Database write operations (import and rebuild) are **enabled by default**. To prevent them:
 
 ```bash
 ACCESS_VCS_DISABLE_WRITES=true
@@ -729,7 +739,17 @@ ACCESS_VCS_DISABLE_WRITES=true
 VBA execution has two tiers with separate permissions controlled via add-in options:
 
 - **`vcs_call_vba`**: Calls existing named functions via `Application.Run`. Controlled by `McpAllowCallVBA` (default: True).
-- **`vcs_run_vba`**: Executes agent-generated code via temp module. Controlled by `McpAllowRunVBA` (default: False). Must be explicitly enabled by the user in the VCS Options form — agents cannot enable this option programmatically via `vcs_set_option`.
+- **`vcs_run_vba`**: Executes agent-generated code via temp module. Controlled by `McpAllowRunVBA` (default: False).
+
+All four permissions (`McpAllowRunVBA`, `McpAllowCallVBA`, `McpAllowExecuteSQL`, `McpAllowImport`) are set by the user in the add-in's MCP options form. No tool can change them: `vcs_set_option`, a `vcs_call_vba` call to the add-in's `SetOption`, and session override files are all refused with `error_pattern: user_controlled_option`.
+
+### What the permissions do not stop
+
+The permissions keep an agent from using a tool you have turned off. They are not a sandbox:
+
+- The project's `vcs-options.json` is an ordinary file in the export folder, which an agent with file access can edit.
+- Importing a module and then calling it with `vcs_call_vba` runs new code even while `McpAllowRunVBA` is off. `ACCESS_VCS_DISABLE_WRITES=true` closes that route, because it refuses import and rebuild.
+- `ACCESS_VCS_DISABLE_WRITES` does not stop `vcs_call_vba` or `vcs_run_vba`, and code already in the database can change it. Turn off `McpAllowCallVBA` as well when an agent must not run any VBA.
 
 ### Path Validation
 

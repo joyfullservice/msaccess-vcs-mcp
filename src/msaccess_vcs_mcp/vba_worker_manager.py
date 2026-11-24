@@ -284,9 +284,11 @@ class VBAWorkerManager:
         return self._recoverable_error(
             "Access is still not responding after a recovery probe.",
             state.error_pattern or "access_unresponsive",
-            hint=(
-                "Resume execution in the VBE, dismiss any Access modal dialog, "
-                "or close and reopen the database, then retry."
+            agent_guidance=(
+                "Call vcs_capture_screenshot(database_path, include_image=False) to see "
+                "whether a dialog or VBA break mode is holding Access. Answer it with "
+                "vcs_dismiss_dialog or vcs_reset_vba when owned_by_server is true; "
+                "otherwise ask the user to. Then retry. For more, call vcs_tips(\"stuck\")."
             ),
             recovery_status=state.status,
         )
@@ -314,10 +316,11 @@ class VBAWorkerManager:
             return self._recoverable_error(
                 error,
                 "timeout",
-                hint=(
-                    "The MCP server is still connected, but Access may still "
-                    "be running the submitted VBA. Wait for Access to respond, "
-                    "resume the VBE if it is in break mode, or dismiss any modal dialog."
+                agent_guidance=(
+                    "Access may still be running the submitted VBA, or waiting on a "
+                    "dialog or break mode. Call vcs_capture_screenshot(database_path, "
+                    "include_image=False) to see which before retrying. For more, call "
+                    "vcs_tips(\"stuck\")."
                 ),
                 recovery_status=state.status,
                 timed_out=True,
@@ -353,9 +356,10 @@ class VBAWorkerManager:
                 return self._recoverable_error(
                     retry_error,
                     retry_pattern,
-                    hint=(
+                    agent_guidance=(
                         "Access responded to the recovery probe, but the retry failed. "
-                        "Confirm Access is responsive before retrying."
+                        "Call vcs_capture_screenshot(database_path, include_image=False) "
+                        "to confirm Access is responsive before retrying."
                     ),
                     recovery_status=retry_state.status,
                     timed_out=retry_result.get("timed_out", False),
@@ -366,9 +370,10 @@ class VBAWorkerManager:
         return self._recoverable_error(
             error,
             pattern,
-            hint=(
+            agent_guidance=(
                 "The failed call was not retried automatically because the VBA "
-                "may have started. Retry after confirming Access is responsive."
+                "may have started. Call vcs_capture_screenshot(database_path, "
+                "include_image=False) to confirm Access is responsive, then retry."
             ),
             recovery_status=state.status,
             phase=phase,
@@ -627,7 +632,7 @@ class VBAWorkerManager:
     def _recoverable_error(
         error: str,
         error_pattern: str,
-        hint: str,
+        agent_guidance: str,
         recovery_status: str,
         timed_out: bool = False,
         phase: str | None = None,
@@ -637,9 +642,9 @@ class VBAWorkerManager:
             "success": False,
             "error": error,
             "error_pattern": error_pattern,
+            "agent_guidance": agent_guidance,
             "recoverable": recoverable,
             "recovery_status": recovery_status,
-            "hint": hint,
         }
         if timed_out:
             result["timed_out"] = True

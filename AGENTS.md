@@ -59,6 +59,11 @@ msaccess-vcs-mcp/
 │   ├── accessibility.py        # MSAA read and press for Office dialogs (raw ctypes)
 │   ├── vba_control.py          # vcs_dismiss_dialog, vcs_reset_vba, code location
 │   ├── compile_check.py        # Editor-side compile that reports the failing line
+│   ├── guidance.py             # agent_guidance added to failed results
+│   ├── access_state.py         # Dialogs and break mode attached to timeouts
+│   ├── shared_open.py          # Import warnings when another session holds the database
+│   ├── tips.py                 # vcs_tips topic loader
+│   ├── tips/                   # vcs_tips topics, one markdown file each
 │   └── access_com/             # Low-level COM/DAO helpers
 ├── tests/                      # pytest test suite
 ├── docs/                       # Extended documentation
@@ -83,6 +88,20 @@ AI Agent ──► MCP Server (Python) ──► VCS Add-in (VBA) ──► Acce
            Usage logging
            Async progress tracking
 ```
+
+### What agents are told, and where
+
+Claude Code cuts server instructions, and any tool description it loads upfront, at 4,096 characters; some other clients never show the instructions to the model. Guidance is split three ways so nothing an agent needs depends on the instructions surviving:
+
+- **Instructions** (`SERVER_INSTRUCTIONS` in `tools.py`, 3,500 characters or fewer): the rules every call needs, with the installed-add-in rule, no parallel calls, the stuck-Access call, and the `vcs_tips` triggers in the first 2,000 characters. No tool reference; every client lists the tools.
+- **Results**: a failed result carries `agent_guidance`, one sentence naming the next call. `guidance.py` fills it in the `vcs_tool` wrapper from `error_pattern` (and a refused `vcs_rebuild_addin`) when the code that built the result did not. Never put guidance or dialog text in `error`; the usage log records that field. On `timeout` and `access_unresponsive`, `access_state.py` also attaches `access_state` (`pid`, `owned_by_server`, `vbe_state`, `modal_blocked`, `dialogs` with text capped at 500 characters) and guidance naming the `dialog_id` or `vcs_reset_vba()`. It reads windows only, through the screenshot resolver, under a 5-second deadline, and only when the call named a database (for `vcs_rebuild_addin`, the development copy beside `source_dir`), because the resolver's single-instance shortcut could describe an unrelated window.
+- **`vcs_tips(topic)`**: depth for one situation, from the files in [src/msaccess_vcs_mcp/tips/](src/msaccess_vcs_mcp/tips/): [addin-development](src/msaccess_vcs_mcp/tips/addin-development.md), [stuck](src/msaccess_vcs_mcp/tips/stuck.md), [compile](src/msaccess_vcs_mcp/tips/compile.md), [logs](src/msaccess_vcs_mcp/tips/logs.md), [run-vba](src/msaccess_vcs_mcp/tips/run-vba.md). Gate-exempt, and the only tool registered with `meta={"anthropic/alwaysLoad": True}`.
+
+`tests/test_agent_text.py` enforces the limits and checks that every `vcs_*` name and `vcs_tips` topic mentioned anywhere exists. When a behaviour described in a topic changes, update the topic in the same change.
+
+### Imports into a database held elsewhere
+
+Design and VBA changes merged into a database that another session has open can fail to save, or be dropped when that session saves. `vcs_import_objects` and `vcs_import_object` warn but never refuse, because the loss cannot be confirmed in advance. `shared_open.py` lists other local holders from the Restart Manager (minus the instance being driven and the server itself) and other computers from the `.laccdb` / `.ldb` lock file, whose entries outlive their sessions and so are labelled "may be stale". Each warning is one sentence: who holds it, the consequence, and the action (ask the user to close it, then verify with `vcs_diff_database`). `warnings` sits ahead of the per-object detail.
 
 ### Access window visibility
 
@@ -213,6 +232,9 @@ Run these tests **through this server**, never from the add-in's own window. `mo
 - **A responsive window is rendered with `PrintWindow`;** a hung one is copied from the screen (`capture_method: "screen"`, with `occluded` when another window covers it). In that copy every other application's window above Access is grayed out, applied bottom to top so an Access dialog above a foreign window keeps its pixels. Dialogs owned by Access are composited onto the image only when they touch the captured window; one on another monitor stays in `dialogs` with a warning rather than stretching the canvas.
 - **Images are returned inline only, never written to disk.** The result is a `CallToolResult` (text then image, no output schema); `usage_logging` reads its outcome from the first text block and never logs the content.
 
+- **`view="design"` opens a form or report in design view**, which fires no Open or Load events, so a layout changed in source can be checked after import without running its code. An object that is already open is captured as it is, with `object.current_view` read from `CurrentView` (and a `note` when the requested view differs). A design open that stops on a notice lands in the same `open_blocked` and cleanup path as an event-code dialog.
+- **Modal and PopUp forms need no pre-check.** Checked on Access 365 (2026-11-24) in a throwaway database: `OpenForm` in normal window mode on a Modal + PopUp form returned in under a second, and `Forms(name).Hwnd` and `CurrentView` answered at once; only `acDialog` window mode blocks, and the tool never uses it. A design open with a second DAO connection holding the file also returned at once, without the exclusive-access notice.
+- **`settle_ms`** (default 150, at most 5000) is the pause between opening an object and capturing it.
 
 `ACCESS_VCS_SCREENSHOT_OPEN_TIMEOUT_SEC` (default 10s) bounds the `open_if_closed` open.
 
@@ -273,7 +295,9 @@ Three sensitivity tiers in the usage stream, each independently controlled:
 
 1. Write the handler function in `tools.py`
 2. Decorate with `@vcs_tool("vcs_your_tool_name")` — this handles config reload, usage logging, and MCP registration automatically
-3. Add tests in `tests/`
+3. Add the name to `READ_ONLY_TOOLS` or `DESTRUCTIVE_TOOLS` in `tools.py` when it is either; the wrapper sets the MCP `readOnlyHint` / `destructiveHint` annotations from them
+4. Keep the description under 4,000 characters (`tests/test_agent_text.py` checks), with what the tool does and its most common mistake first
+5. Add tests in `tests/`
 
 ## Key Conventions
 

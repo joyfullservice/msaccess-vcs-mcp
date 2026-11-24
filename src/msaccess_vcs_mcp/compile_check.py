@@ -26,7 +26,7 @@ import time
 from typing import Any, Callable
 
 from . import screen_capture as sc
-from .access_com.instance_registry import paths_match
+from .access_com.vba_project import current_vb_project
 
 COMPILE_CONTROL_ID = 578
 VBE_DIALOG_TITLE = "Microsoft Visual Basic for Applications"
@@ -35,20 +35,6 @@ POLL_SEC = 0.1
 PROBE_INTERVAL_SEC = 0.25
 DISMISS_WAIT_SEC = 3.0
 CODE_WINDOW_TITLE = re.compile(r"^(?P<module>.+?) \((?:Code)\)$")
-
-
-def current_vb_project(app: Any) -> Any:
-    """The current database's VBA project, not a loaded add-in's."""
-    vbe = app.VBE
-    target = str(app.CurrentProject.FullName)
-    for index in range(1, int(vbe.VBProjects.Count) + 1):
-        project = vbe.VBProjects(index)
-        try:
-            if paths_match(str(project.FileName), target):
-                return project
-        except Exception:
-            continue
-    return vbe.ActiveVBProject
 
 
 def compile_timeout() -> float:

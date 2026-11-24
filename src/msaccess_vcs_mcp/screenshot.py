@@ -39,7 +39,9 @@ CAPTURE_TIMEOUT_SEC = 30.0
 DEFAULT_OPEN_TIMEOUT_SEC = 10.0
 COM_STEP_TIMEOUT_SEC = 10.0
 CAPTURE_STEP_TIMEOUT_SEC = 20.0
-PAINT_SETTLE_SEC = 0.15
+DEFAULT_SETTLE_MS = 150
+MAX_SETTLE_MS = 5000
+VIEWS = ("normal", "design")
 
 # Access object types (AcObjectType), views, and save options.
 AC_TABLE = 0
@@ -47,11 +49,19 @@ AC_QUERY = 1
 AC_FORM = 2
 AC_REPORT = 3
 AC_NORMAL = 0
+AC_DESIGN = 1
 AC_VIEW_NORMAL = 0
+AC_VIEW_DESIGN = 1
 AC_VIEW_PREVIEW = 2
 AC_READ_ONLY = 2
 AC_SAVE_NO = 2
 AC_OBJECT_TYPES = {"table": AC_TABLE, "query": AC_QUERY, "form": AC_FORM, "report": AC_REPORT}
+
+# AcCurrentView, read from Form.CurrentView and Report.CurrentView.
+CURRENT_VIEW_NAMES = {
+    0: "design", 1: "form", 2: "datasheet", 3: "pivot_table", 4: "pivot_chart",
+    5: "print_preview", 6: "report", 7: "layout",
+}
 
 # DAO QueryDefTypeEnum values that only return rows. Everything else --
 # action, DDL, make-table, pass-through -- can change data when opened.
@@ -517,6 +527,8 @@ class ObjectRequest:
     open_if_closed: bool
     max_dimension: int
     include_image: bool
+    view: str = "normal"
+    settle_ms: int = DEFAULT_SETTLE_MS
 
 
 class _Progress:
@@ -596,6 +608,14 @@ def _access_object(app: Any, object_type: str, name: str) -> Any:
         raise
 
 
+def _current_view(obj: Any) -> str | None:
+    try:
+        value = int(obj.CurrentView)
+    except Exception:
+        return None
+    return CURRENT_VIEW_NAMES.get(value, str(value))
+
+
 def _datasheet_hwnd(app: Any, main_hwnd: int) -> int:
     try:
         return normalize_hwnd(app.Screen.ActiveDatasheet.Hwnd)
@@ -660,16 +680,25 @@ def _object_session(request: ObjectRequest, progress: _Progress, box: dict[str, 
                         )
                     hwnd = normalize_hwnd(form.Hwnd)
                     object_meta["source"] = "Forms"
+                    object_meta["current_view"] = _current_view(form)
                 elif request.object_type == "report":
                     report = app.Reports(name)
                     hwnd = normalize_hwnd(report.Hwnd)
                     object_meta["source"] = "Reports"
+                    object_meta["current_view"] = _current_view(report)
                 else:
                     previous = (int(app.CurrentObjectType), str(app.CurrentObjectName))
                     app.DoCmd.SelectObject(ac_type, name, False)
                     object_meta["activated_by_tool"] = True
                     hwnd = _datasheet_hwnd(app, main_hwnd)
                     object_meta["source"] = "Screen.ActiveDatasheet"
+                current = object_meta.get("current_view")
+                if request.view == "design" and current not in (None, "design"):
+                    object_meta["note"] = (
+                        f"The {request.object_type} was already open in {current} view, so it "
+                        "was captured as it is. view='design' applies only to objects this "
+                        "tool opens."
+                    )
                 if (
                     request.object_type in ("form", "report")
                     and main_hwnd
@@ -697,11 +726,12 @@ def _object_session(request: ObjectRequest, progress: _Progress, box: dict[str, 
                             f"(DAO type {query_type}); opening it could change data.",
                         )
                 progress.enter("open")
+                design = request.view == "design"
                 try:
                     if request.object_type == "form":
-                        app.DoCmd.OpenForm(name, AC_NORMAL)
+                        app.DoCmd.OpenForm(name, AC_DESIGN if design else AC_NORMAL)
                     elif request.object_type == "report":
-                        app.DoCmd.OpenReport(name, AC_VIEW_PREVIEW)
+                        app.DoCmd.OpenReport(name, AC_VIEW_DESIGN if design else AC_VIEW_PREVIEW)
                     elif request.object_type == "table":
                         app.DoCmd.OpenTable(name, AC_VIEW_NORMAL, AC_READ_ONLY)
                     else:
@@ -716,6 +746,7 @@ def _object_session(request: ObjectRequest, progress: _Progress, box: dict[str, 
                     raise
                 progress.opened = True
                 object_meta["opened_by_tool"] = True
+                object_meta["view"] = request.view
                 if progress.abandoned.is_set():
                     return
                 progress.enter("settle")
@@ -723,7 +754,7 @@ def _object_session(request: ObjectRequest, progress: _Progress, box: dict[str, 
                     app.DoCmd.RepaintObject(ac_type, name)
                 except Exception:
                     pass
-                time.sleep(PAINT_SETTLE_SEC)
+                time.sleep(request.settle_ms / 1000)
                 if request.object_type == "form":
                     hwnd = normalize_hwnd(app.Forms(name).Hwnd)
                 elif request.object_type == "report":
@@ -817,8 +848,9 @@ def capture_object_sync(request: ObjectRequest) -> dict[str, Any]:
                 error = ScreenshotError(
                     "open_blocked",
                     f"Opening the object did not finish within {_phase_limit(phase):.0f} s, "
-                    "usually because its Open or Load event is showing a dialog. If the object "
-                    "opens once the dialog is answered, this "
+                    "usually because its Open or Load event is showing a dialog, or, in "
+                    "design view, because Access is warning that the database is not open "
+                    "exclusively. If the object opens once the dialog is answered, this "
                     "server closes it without saving.",
                     object=object_meta,
                 )
@@ -852,6 +884,8 @@ def validate_arguments(
     open_if_closed: bool,
     pid: int | None,
     max_dimension: int,
+    view: str = "normal",
+    settle_ms: int = DEFAULT_SETTLE_MS,
 ) -> None:
     if target not in TARGETS:
         raise ScreenshotError("invalid_argument", f"target must be one of {', '.join(TARGETS)}.")
@@ -876,6 +910,16 @@ def validate_arguments(
             )
         if not object_name:
             raise ScreenshotError("invalid_argument", "target='object' needs object_name.")
+    if view not in VIEWS:
+        raise ScreenshotError("invalid_argument", f"view must be one of {', '.join(VIEWS)}.")
+    if view == "design" and (target != "object" or object_type not in ("form", "report")):
+        raise ScreenshotError(
+            "invalid_argument", "view='design' applies only to target='object' forms and reports."
+        )
+    if not 0 <= settle_ms <= MAX_SETTLE_MS:
+        raise ScreenshotError(
+            "invalid_argument", f"settle_ms must be between 0 and {MAX_SETTLE_MS}."
+        )
 
 
 async def _in_thread(fn: Callable[[], Any], timeout: float = CAPTURE_TIMEOUT_SEC) -> Any:
@@ -915,11 +959,14 @@ async def capture_screenshot(
     max_dimension: int,
     include_image: bool,
     get_gate: Callable[[], Any],
+    view: str = "normal",
+    settle_ms: int = DEFAULT_SETTLE_MS,
 ) -> CallToolResult:
     base: dict[str, Any] = {"target": target}
     try:
         validate_arguments(
             database_path, target, object_type, object_name, open_if_closed, pid, max_dimension,
+            view, settle_ms,
         )
         resolved_pid, source = await _in_thread(lambda: resolve_target_pid(database_path, pid))
     except ScreenshotError as exc:
@@ -964,6 +1011,8 @@ async def capture_screenshot(
         open_if_closed=open_if_closed,
         max_dimension=max_dimension,
         include_image=include_image,
+        view=view,
+        settle_ms=settle_ms,
     )
     result = await gate.run_exclusive(
         "vcs_capture_screenshot", str(database_path), capture_object_sync, False, request

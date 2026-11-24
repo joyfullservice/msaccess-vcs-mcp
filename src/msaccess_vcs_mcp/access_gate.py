@@ -32,6 +32,8 @@ EXEMPT_TOOLS = frozenset({
     "vcs_get_version_info",
     "vcs_cancel_operation",
     "vcs_get_recent_calls",
+    # Reads packaged text, so it answers while Access is blocked.
+    "vcs_tips",
     # Launch holds the gate itself; the subsequent status-file wait must not.
     "vcs_rebuild_addin",
     # Window captures use Win32 only so they work while Access is blocked;

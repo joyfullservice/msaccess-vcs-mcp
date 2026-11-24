@@ -392,7 +392,7 @@ def test_failed_probe_does_not_recycle_user_owned_instance(monkeypatch):
 
     assert result["success"] is False
     assert result["error_pattern"] == "access_unresponsive"
-    assert "close and reopen" in result["hint"]
+    assert "vcs_capture_screenshot" in result["agent_guidance"]
     recycle.assert_called_once_with("C:\\db.accdb")
     assert [c["operation"] for c in calls] == ["probe"]
 

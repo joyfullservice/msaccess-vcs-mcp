@@ -42,7 +42,7 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
-from mcp.types import CallToolResult
+from mcp.types import CallToolResult, ToolAnnotations
 
 from .access_com.connection import (
     AccessConnection,
@@ -52,7 +52,12 @@ from .access_com.connection import (
 )
 from .access_com.dao_helpers import list_query_defs, list_table_defs
 from .access_com.process_qos import list_access_pids, prefer_full_power_app
+from .access_com.vba_project import current_vb_project
 from .access_gate import EXEMPT_TOOLS, get_access_gate
+from .access_state import attach_access_state
+from .guidance import with_guidance
+from .shared_open import shared_open_warnings, with_warnings_first
+from .tips import get_tips
 from .config import (
     get_config,
     get_callback_url,
@@ -91,14 +96,21 @@ _COMPILE_FAILURE_AGENT_GUIDANCE = (
     "Call vcs_capture_screenshot(database_path, target=\"vbe\"): the editor "
     "highlights the error. If that does not show it, stop editing source "
     "files and ask the user to compile in the VBE (Debug → Compile) and paste "
-    "the code around the error line. Do not guess fixes or iterate blindly."
+    "the code around the error line. Do not guess fixes or iterate blindly. "
+    "For more, call vcs_tips(\"compile\")."
 )
 
 _COMPILE_ERROR_LOCATED_GUIDANCE = (
     "Compilation stopped at the error in `compile_error` (module, line, and "
     "code). Fix that line in the source file, import it, and run "
     "vcs_compile_vba again. The compiler stops at the first error, so others "
-    "may follow."
+    "may follow. For more, call vcs_tips(\"compile\")."
+)
+
+_ADDIN_NOT_RESPONSIVE_GUIDANCE = (
+    "Call vcs_capture_screenshot(database_path, include_image=False) to see whether "
+    "Access is showing a dialog or is in VBA break mode, then retry. For more, call "
+    "vcs_tips(\"stuck\")."
 )
 
 _NOT_COMPILED_AGENT_GUIDANCE = (
@@ -360,169 +372,62 @@ def _check_database_busy(database_path: str) -> dict[str, Any] | None:
             "active_operation_id": busy_status["operation_id"],
             "active_command": busy_status["command"],
             "elapsed_seconds": busy_status["elapsed_seconds"],
-            "hint": "Wait for the current operation to complete, or cancel it with vcs_cancel_operation()"
+            "agent_guidance": (
+                "Wait for the current operation to complete, or cancel it with "
+                "vcs_cancel_operation()."
+            ),
         }
     return None
 
 
 # Create FastMCP server instance with proper metadata
+# Claude Code cuts server instructions at 4,096 characters and some clients never
+# show them at all, so the rules every call needs come first, and failure-time
+# guidance travels in results (guidance.py) and vcs_tips.
+SERVER_INSTRUCTIONS = (
+    "Version control for Microsoft Access databases (VBA modules, forms, reports, "
+    "queries, macros, tables), driven through the MSAccess VCS add-in. Export a "
+    "database to text source files, edit them, import or merge changes back, rebuild "
+    "a database from source, compile and run VBA, run tests, and capture screenshots "
+    "of Access windows. All tools use the vcs_ prefix.\n\n"
+    "Rules for every call:\n"
+    "- The installed add-in (under %APPDATA%\\MSAccessVCS) is never a target. Tools "
+    "refuse it as database_path, output_path, or template_path. Work on the "
+    "development copy in the add-in's repository and rebuild from there.\n"
+    "- Access runs one call at a time. Issue Access tool calls one after another, "
+    "not in parallel; a call that waits too long (15 seconds by default) for another "
+    "returns error_pattern \"server_busy\" and can be retried.\n"
+    "- If Access seems stuck or a call timed out, call "
+    "vcs_capture_screenshot(database_path, include_image=False). It lists every "
+    "dialog Access is showing and whether VBA is in break mode, and it works while "
+    "Access is blocked.\n"
+    "- A failed result may carry agent_guidance with the next step; follow it.\n\n"
+    "Call vcs_tips(topic) for depth:\n"
+    "- If you are working on the msaccess-vcs-addin repository itself, call "
+    "vcs_tips(\"addin-development\") first.\n"
+    "- Access stuck, a dialog, break mode, or a timeout: vcs_tips(\"stuck\").\n"
+    "- VBA compile errors: vcs_tips(\"compile\").\n"
+    "- Writing code for vcs_run_vba: vcs_tips(\"run-vba\").\n"
+    "- Finding operation logs: vcs_tips(\"logs\").\n\n"
+    "Workflow: vcs_export_database writes source files; edit them; "
+    "vcs_import_objects merges changes back; vcs_diff_database compares the database "
+    "with source; vcs_rebuild_database builds a fresh database from source. Most "
+    "tools take database_path, the full path to the database file.\n\n"
+    "Configuration comes from environment variables, usually in a .env file. "
+    "ACCESS_VCS_DATABASE names the default database. ACCESS_VCS_DISABLE_WRITES=true "
+    "refuses import and rebuild.\n\n"
+    "Leave Access windows open. Never stop or kill MSACCESS.EXE: another agent or "
+    "the user may own the window. vcs_dismiss_dialog and vcs_reset_vba act only on "
+    "windows this server created; for the user's windows, ask the user.\n\n"
+    "vcs_rebuild_database builds a user project from source. vcs_rebuild_addin "
+    "rebuilds the VCS add-in itself from its Version Control.accda.src folder.\n\n"
+    "If the client times out (-32001), no result reaches you. Call "
+    "vcs_get_recent_calls() to see what actually ran before retrying."
+)
+
 mcp = FastMCP(
     name="msaccess-vcs-mcp",
-    instructions=(
-        "Microsoft Access version control MCP server. "
-        "Export Access database objects to source files, import them back, "
-        "rebuild databases from source, and track changes. "
-        "All tools use the vcs_ prefix.\n\n"
-        "**Recommended workflow:**\n"
-        "1. Use vcs_export_database() to export all objects to source directory\n"
-        "2. Edit source files using your preferred tools\n"
-        "3. Use vcs_import_objects() to merge changes back into database\n"
-        "4. Use vcs_rebuild_database() to create fresh database from source\n"
-        "5. Use vcs_diff_database() to see what changed\n\n"
-        "**Configuration:**\n"
-        "Set ACCESS_VCS_DATABASE to your target database path.\n"
-        "Set ACCESS_VCS_DISABLE_WRITES=true to prevent database modifications.\n\n"
-        "**Rebuilding the VCS add-in:**\n"
-        "To rebuild `Version Control.accda` from source after editing add-in files, "
-        "call vcs_rebuild_addin(\"<source folder>\"). It derives the development copy "
-        "of the add-in (the `Version Control.accda` beside the source folder), launches "
-        "RebuildAddIn, and waits on `<source>/logs/rebuild-status.json` with filesystem "
-        "notifications until status is `complete`, `cancelled`, or `*-failed`. Do NOT open a user "
-        "database, anything in the repo's Testing folder, or a scratch database to host "
-        "this -- rebuilding the add-in is a repository operation and belongs to the "
-        "repository's own copy. Prefer this over polling the status file yourself.\n"
-        "`refused` and `launch-failed` are returned immediately and mean nothing was "
-        "rebuilt. Before launch the server closes Access windows it created that hold "
-        "a file the rebuild replaces. The rebuild still refuses when a user-owned "
-        "MSACCESS.EXE holds one of those files, and never closes another process. "
-        "On refusal, `otherInstances` names each process and which file it holds; close "
-        "those and call again. `launch-failed` means the helper script never started: "
-        "Access is left open and the call is safe to retry.\n"
-        "This is not vcs_rebuild_database, which rebuilds a user project. "
-        "vcs_call_vba(db, \"VCS.API\", [\"RebuildAddIn\", source]) remains a launch-only "
-        "escape hatch; it does not wait for the rebuild to finish.\n"
-        "MCP progress notifications are best-effort in Cursor: the server emits them, "
-        "but some Cursor builds show only \"Running...\" until the tool returns. For "
-        "live terminal output, run `msaccess-vcs rebuild-addin <source>` (or export / "
-        "merge / rebuild-database / run-tests).\n"
-        "After any MCP client timeout (`-32001`), call vcs_get_recent_calls() to learn "
-        "what actually executed — the server may have finished after the client gave up.\n"
-        "One server process is shared across Cursor windows. When another window holds the "
-        "Access gate, tools return `error_pattern: server_busy` with `busy_with` naming the "
-        "in-flight tool — retry instead of waiting for a client timeout.\n"
-        "vcs_call_vba has a server-side timeout (default 45s via "
-        "ACCESS_VCS_CALL_VBA_TIMEOUT_SEC); raising it above the client's request timeout "
-        "brings `-32001` back.\n\n"
-        "**Running the add-in's own tests:**\n"
-        "Pass the **development copy** in the add-in's repository -- the `Version "
-        "Control.accda` beside `Version Control.accda.src` -- as database_path. The "
-        "runner scans the current VBA project, so that copy is the code under test, "
-        "while the installed add-in loads as a library and supplies the runner and "
-        "TestAssert. Both roles are required and they are different files. A user "
-        "database or anything in the repo's Testing folder finds that database's tests "
-        "instead. This server opens the development copy for you, so no manual pre-open "
-        "step is needed. Always run these tests through this server rather than from the "
-        "add-in's own window -- an all-EMPTY result (zero assertions) means the harness "
-        "was bypassed, not that the tests passed. For live per-test output, run "
-        "`msaccess-vcs run-tests <database>` from a terminal (same pattern as "
-        "rebuild-addin). Headless means no add-in UI, not a hidden Access window.\n\n"
-        "**The installed add-in is never a target:**\n"
-        "No tool accepts the installed add-in under %APPDATA%\\MSAccessVCS as "
-        "database_path, output_path, or template_path. That file exists to be loaded as "
-        "a library: opening it as a database, or writing into it, resets a VBA project "
-        "while it is executing. Any such call is refused with "
-        "`error_pattern: installed_addin_refused` before Access is touched, whichever "
-        "tool it was -- export, import, rebuild, run_vba, run_tests, call_vba, or "
-        "anything else. Work on the development copy in the add-in's repository and "
-        "rebuild from there; the rebuild is what replaces the installed file. "
-        "vcs_get_version_info() reports the installed add-in's version without opening "
-        "it. The comparison ignores the file extension, because a compiled install is a "
-        "`.accde` built from the same `.accda`.\n\n"
-        "**VBA compile failures:**\n"
-        "vcs_compile_vba compiles from the VBA editor and, on an error, returns the "
-        "failing module, line, and code in `compile_error`. Fix that line in source, "
-        "import it, and compile again. If no line is reported, call "
-        "vcs_capture_screenshot(database_path, target=\"vbe\") to see the editor.\n\n"
-        "**Access seems stuck, or a call timed out:**\n"
-        "Call vcs_capture_screenshot(database_path, include_image=False) first. It returns "
-        "the text of every dialog Access is showing (MsgBox, compile error, prompt) "
-        "without any image tokens, and works while Access is blocked or another call "
-        "holds the gate. Call it again with the image when the layout matters; "
-        "target=\"vbe\" shows the VBA editor (module, highlighted line, break mode). "
-        "vcs_dismiss_dialog and vcs_reset_vba answer dialogs and end break mode in "
-        "windows this server created; for the user's windows, ask the user.\n\n"
-        "**Tool quick-reference (required parameters marked with *, optional with ?):**\n"
-        "- vcs_get_version_info() — server, add-in, and Access version info\n"
-        "- vcs_list_objects(database_path*) — list all objects by type\n"
-        "- vcs_export_database(database_path*, output_dir*, object_types?, full_export?) "
-        "— export project (or scoped categories via object_types) to source files\n"
-        "- vcs_export_object(database_path*, object_type*, object_name?) "
-        "— export a single object/type to source\n"
-        "- vcs_import_objects(database_path*, source_dir*, object_types?, full_import?) "
-        "— merge project (or scoped categories via object_types) from source; "
-        "scoped merges reconcile deletions and take no backup\n"
-        "- vcs_import_object(database_path*, object_type*, object_name?) "
-        "— import a single object/type from source\n"
-        "- vcs_rebuild_database(source_dir*, output_path?, template_path?) "
-        "— build fresh database from source (unattended; output_path needs add-in 5.1.1+)\n"
-        "- vcs_rebuild_addin(source_dir*, timeout_seconds?) "
-        "— rebuild the VCS add-in from source and wait for install\n"
-        "- vcs_diff_database(database_path*, source_dir*, show_details?) "
-        "— compare database against source files\n"
-        "- vcs_run_vba(database_path*, code*, timeout_seconds?) "
-        "— execute agent-generated VBA in a temporary module\n"
-        "- vcs_call_vba(database_path*, function_name*, args?, timeout_seconds?) "
-        "— call an existing public VBA function\n"
-        "- vcs_execute_sql(database_path*, sql*, max_rows?) "
-        "— run a read-only SELECT query via DAO\n"
-        "- vcs_run_tests(database_path*, filter?, timeout_seconds?) — run VBA tests "
-        "(prefer `msaccess-vcs run-tests` for live per-test output)\n"
-        "- vcs_compile_vba(database_path*, suppress_warnings?) — compile all VBA modules\n"
-        "- vcs_check_vba_compiled(database_path*) — check VBA compilation status\n"
-        "- vcs_get_option(database_path*, option_name*) — read a VCS option value\n"
-        "- vcs_set_option(database_path*, option_name*, value*) "
-        "— set a VCS option for this session\n"
-        "- vcs_get_log(database_path*, log_type?) — read Export or Build log\n"
-        "- vcs_capture_screenshot(database_path?, target?, object_type?, object_name?, "
-        "open_if_closed?, pid?, max_dimension?, include_image?) — PNG of the Access "
-        "window, VBA editor, active object, or a named object, plus dialog text\n"
-        "- vcs_dismiss_dialog(dialog_id*, button*, database_path?, pid?) — click a "
-        "button on a dialog in a server-created Access window\n"
-        "- vcs_reset_vba(database_path?, pid?) — end VBA break mode in a "
-        "server-created Access window\n"
-        "- vcs_get_recent_calls(limit?) — recent tool_call entries from the usage log\n"
-        "- vcs_end_session(database_path*) — end session, remove option overrides\n"
-        "- vcs_cancel_operation(operation_id?, database_path?) — cancel a running export, import, rebuild, or test run (no args: the only one running)\n\n"
-        "**Common mistakes to avoid:**\n"
-        "- Almost every tool requires database_path* — pass the full .accdb path.\n"
-        "- vcs_run_vba() executes arbitrary VBA code you provide in the code* parameter. "
-        "Do NOT guess tool names like vcs_eval, vcs_execute_code, or vcs_run_code — "
-        "they do not exist.\n"
-        "- vcs_run_vba() returns values via a MCP_TempFunction pattern — "
-        "read the full tool description for details.\n"
-        "- To call a VCS add-in API method (Export, Build, RunTests, "
-        "RunRoundtripTests, ...), use vcs_call_vba(db, \"VCS.API\", [\"<Method>\", ...]). "
-        "Do NOT call the API from inside vcs_run_vba: that code is itself delivered "
-        "through modAPI.API, so calling back into the API is re-entrant and is refused.\n"
-        "- Application.Run qualifiers match a loaded VBA *project* name, not a file "
-        "name, so \"Version Control.API\" does not resolve. Pass \"VCS.API\" and the "
-        "server rewrites it to the add-in's full path.\n\n"
-        "**Logs:**\n"
-        "Two JSON Lines streams (both prefixed `vcs-mcp-` so they don't collide with "
-        "other tools' logs in a shared directory).\n"
-        "1. `vcs-mcp-diagnostic.jsonl` -- always-on lifecycle log "
-        "(server_start, startup_env_load, lazy_init_*). Lives at "
-        "`~/.msaccess-vcs-mcp/logs/`. Opt out with "
-        "ACCESS_VCS_DISABLE_DIAGNOSTIC_LOG=true.\n"
-        "2. `vcs-mcp-usage.jsonl` -- tool-call audit + code-execution events. "
-        "Default-on; opt out with ACCESS_VCS_ENABLE_LOGGING=false. "
-        "SQL/VBA bodies are recorded as `code_length` only (full `code` "
-        "field requires ACCESS_VCS_LOG_CODE_CONTENT=true). Param keys "
-        "matching password/secret/token/api_key/connection_string are "
-        "auto-masked to `<redacted>`. Override location with "
-        "ACCESS_VCS_LOG_DIR. Call `vcs_get_version_info()` to discover "
-        "both active log paths."
-    )
+    instructions=SERVER_INSTRUCTIONS,
 )
 
 
@@ -661,7 +566,42 @@ async def _ensure_env_loaded(ctx: Context | None) -> None:
     log_diagnostic_event("lazy_init_no_env_in_roots", roots=root_uris)
 
 
-def vcs_tool(name: str):
+READ_ONLY_TOOLS = frozenset({
+    "vcs_list_objects",
+    "vcs_diff_database",
+    "vcs_get_option",
+    "vcs_get_log",
+    "vcs_get_version_info",
+    "vcs_get_recent_calls",
+    "vcs_check_vba_compiled",
+    "vcs_execute_sql",
+    "vcs_capture_screenshot",
+    "vcs_tips",
+})
+
+DESTRUCTIVE_TOOLS = frozenset({
+    "vcs_import_objects",
+    "vcs_import_object",
+    "vcs_rebuild_database",
+    "vcs_rebuild_addin",
+    "vcs_set_option",
+})
+
+
+def _default_annotations(name: str) -> ToolAnnotations | None:
+    if name in READ_ONLY_TOOLS:
+        return ToolAnnotations(readOnlyHint=True)
+    if name in DESTRUCTIVE_TOOLS:
+        return ToolAnnotations(readOnlyHint=False, destructiveHint=True)
+    return None
+
+
+def vcs_tool(
+    name: str,
+    *,
+    annotations: ToolAnnotations | None = None,
+    meta: dict[str, Any] | None = None,
+):
     """Register an MCP tool with lazy .env discovery, config reload, and logging.
 
     Composes these concerns in the correct order so that every tool call:
@@ -676,6 +616,11 @@ def vcs_tool(name: str):
        the server is running).
     3. Initializes or re-initializes usage logging with the current env vars.
     4. Executes the tool body and logs the outcome.
+    5. On a timeout or unresponsive Access, attaches ``access_state``: the
+       dialogs and break mode Access shows, read with window calls only
+       (:mod:`access_state`).
+    6. Adds ``agent_guidance`` to a failed result that has none
+       (:mod:`guidance`).
 
     The wrapper is *always* an async coroutine. FastMCP detects this via
     ``inspect.iscoroutinefunction`` and awaits it correctly. Sync tool
@@ -689,6 +634,11 @@ def vcs_tool(name: str):
 
         @functools.wraps(func)
         async def with_refresh(*args, **kwargs):
+            result = await _run_tool(*args, **kwargs)
+            result = await attach_access_state(name, func, args, kwargs, result)
+            return with_guidance(name, result)
+
+        async def _run_tool(*args, **kwargs):
             # ``mcp.get_context()`` returns a Context bound to the active
             # request even when the tool itself doesn't declare a ctx
             # parameter -- the lowlevel server sets the contextvar before
@@ -728,7 +678,9 @@ def vcs_tool(name: str):
                 **kwargs,
             )
 
-        return mcp.tool()(with_refresh)
+        return mcp.tool(
+            annotations=annotations or _default_annotations(name), meta=meta
+        )(with_refresh)
     return decorator
 
 
@@ -823,7 +775,7 @@ async def vcs_export_database(
                     "exported_count": 0,
                     "export_path": str(export_path),
                     "objects_by_type": {},
-                    "hint": "Check if Access has any open dialogs or message boxes"
+                    "agent_guidance": _ADDIN_NOT_RESPONSIVE_GUIDANCE,
                 }
 
             # Category-scoped export: sync ExportByType (no progress callbacks).
@@ -988,8 +940,7 @@ async def vcs_list_objects(
             # List modules
             module_names = []
             try:
-                vbe = app.VBE
-                vb_project = vbe.ActiveVBProject
+                vb_project = current_vb_project(app)
                 for component in vb_project.VBComponents:
                     if component.Type in (1, 2):  # Standard and class modules
                         module_names.append(component.Name)
@@ -1198,7 +1149,23 @@ async def vcs_import_objects(
     
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Merge").
+    A ``warnings`` entry says when another session has the database open.
     """
+    advisory: list[str] = []
+    result = await _import_objects(
+        database_path, source_dir, object_types, full_import, ctx, advisory
+    )
+    return with_warnings_first(result, advisory)
+
+
+async def _import_objects(
+    database_path: str,
+    source_dir: str,
+    object_types: list[str] | None,
+    full_import: bool,
+    ctx: Context | None,
+    advisory: list[str],
+) -> dict[str, Any]:
     config = get_config()
     callback_url = get_callback_url()
     op_manager = _get_operation_manager()
@@ -1219,6 +1186,7 @@ async def vcs_import_objects(
         # Connect to database
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
+            advisory.extend(shared_open_warnings(str(db_path), app))
             
             # Initialize add-in integration; load_addin probes the add-in
             # with a hard timeout, surfacing dialog-blocked / VBA-break /
@@ -1232,7 +1200,7 @@ async def vcs_import_objects(
                     "success": False,
                     "error": f"Add-in not responsive (may have a dialog open): {e}",
                     "imported_count": 0,
-                    "hint": "Check if Access has any open dialogs or message boxes"
+                    "agent_guidance": _ADDIN_NOT_RESPONSIVE_GUIDANCE,
                 }
 
             # Category-scoped merge: ImportByType runs synchronously in Access.
@@ -1362,6 +1330,21 @@ def _parse_addin_version(value: Any) -> tuple[int, ...] | None:
         return tuple(int(part) for part in str(value).strip().split("."))
     except (TypeError, ValueError):
         return None
+
+
+# RunTestsMatching takes the filter as an argument. Older add-ins only read it from
+# the DefaultTestFilter option, and setting that through SetOption writes
+# mcp/options-default.json into the user's export folder, where nothing deletes it.
+# Calling a method the add-in lacks raises a modal dialog, so this is a version check.
+_RUN_TESTS_MATCHING_MIN_VERSION = (5, 2, 0)
+
+
+def _test_run_command(version_text: Any, filter: str | None) -> tuple[str, tuple[str, ...]]:
+    """Return the add-in method and arguments that run the tests matching ``filter``."""
+    version = _parse_addin_version(version_text)
+    if version is not None and version >= _RUN_TESTS_MATCHING_MIN_VERSION:
+        return "RunTestsMatching", (filter or "",)
+    return "RunFilteredTests", ()
 
 
 def _build_headless_refusal(version_text: Any, output_path: str | None) -> dict[str, Any] | None:
@@ -2103,6 +2086,28 @@ def _with_rebuild_fields(
     return result
 
 
+@vcs_tool("vcs_tips", meta={"anthropic/alwaysLoad": True})
+def vcs_tips(topic: str | None = None) -> dict[str, Any]:
+    """
+    Guidance for situations the server instructions only mention: troubleshooting
+    stuck or hung Access, dialogs and VBA break mode, timeouts, server_busy, VBA
+    compile errors, finding logs, writing code for vcs_run_vba, and developing or
+    testing the VCS add-in itself (its rebuild and self-tests).
+
+    Call with no topic for the list. Topics: addin-development, stuck, compile,
+    logs, run-vba. An unknown topic is matched against topic text. Works while
+    Access is blocked or another call is running.
+
+    Args:
+        topic: Topic name, or a word to search for
+
+    Returns:
+        ``topic`` and its markdown ``content``, or ``topics`` (name and summary
+        of each) when no topic is given or none matches.
+    """
+    return get_tips(topic)
+
+
 @vcs_tool("vcs_get_version_info")
 async def vcs_get_version_info(
     ctx: Context | None = None,
@@ -2531,6 +2536,7 @@ def vcs_import_object(
     
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Merge").
+    A ``warnings`` entry says when another session has the database open.
     """
     try:
         config = get_config()
@@ -2540,13 +2546,14 @@ def vcs_import_object(
         
         with AccessConnection(str(db_path)) as conn:
             app, db = conn.connect()
+            advisory = shared_open_warnings(str(db_path), app)
             
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
             
             result_json = addin.call_sync("ImportObject", object_type, object_name)
             
-            return _addin_json_result(result_json)
+            return with_warnings_first(_addin_json_result(result_json), advisory)
     
     except PermissionError as e:
         return {"success": False, "error": str(e)}
@@ -2688,6 +2695,14 @@ def _execute_call_vba(
                 "success": False,
                 "error": "Maximum 3 arguments supported for vcs_call_vba",
             })
+
+        if (
+            _is_addin_api_resolved_name(resolved_name)
+            and len(call_args) >= 2
+            and str(call_args[0]).lower() == "setoption"
+            and _is_user_controlled_option(call_args[1])
+        ):
+            return _user_controlled_option_refusal(call_args[1])
 
         is_rebuild = (
             _is_addin_api_resolved_name(resolved_name)
@@ -3048,93 +3063,66 @@ def vcs_run_vba(
 ) -> dict[str, Any]:
     """
     Execute agent-generated VBA code in a temporary module.
-    
-    Sends a block of VBA code to the add-in's RunVBA method, which handles the
-    full lifecycle: creates a temp module, wraps the code in a function with error
-    handling, compiles the project to validate, executes, captures the result,
-    removes the temp module, and returns structured JSON.
-    
-    **Requires McpAllowRunVBA option to be enabled** (default: off).
-    The user must enable this manually in the VCS Options form.
 
-    **Reset and temporary-module recovery:**
-    Before creating the wrapper, the worker queues a host-project VBA reset
-    in a separate API call, runs a harmless COM message-pump barrier, and
-    reacquires its Access references. A reset refusal or failure is fail-closed:
-    the submitted code does not run.
+    Your code becomes the body of a function named MCP_TempFunction; assign to
+    it to return a value. Send statements, not a bare expression:
+        Dim qd As DAO.QueryDef
+        Set qd = CurrentDb.QueryDefs("qryExample")
+        MCP_TempFunction = qd.SQL
 
-    The add-in sweeps stale `MCP_Temp_*` standard modules before creating the
-    wrapper. Recovery and cleanup fields are actionable:
-      - `sweptModules`: stale modules removed before the payload
-      - `temp_module_sweep_failed` + `orphanModules`: stale modules remain;
-        payload not started
-      - `temp_module_unresolvable` + `tempModule`: post-compile canary failed;
-        payload not started
-      - `temp_module_cleanup_failed` + `cleanupFailed` + `orphanModule`:
-        wrapper survived cleanup; a completed return is preserved as
-        `payloadResult`
+    Returns `success` and `result`; on failure `error`, `error_pattern`,
+    `errorNumber`, and `errorLine` (the 1-based line of your `code` that raised
+    the captured error). `compileError`, `sweptModules`, and the temp-module
+    fields below appear when they apply.
 
-    Stop and tell the user when cleanup fails rather than repeatedly issuing
-    calls against a project with an orphaned wrapper.
-    
-    The agent's code should set the function return value via the
-    MCP_TempFunction identifier. Example:
-        Dim result As String
-        result = CurrentDb.QueryDefs("qryCustomers").SQL
-        MCP_TempFunction = result
-    
-    **Line-number debugging:**
-    The add-in auto-prepends sequential 1-based VBA line numbers to every
-    executable line in `code` before running it. When a runtime error fires
-    inside the wrapper, the response includes an `errorLine` field whose
-    value equals the 1-based line number within the `code` string you
-    submitted. The counter advances on every physical input line (blanks,
-    comments, and `_` continuations included) even though only executable
-    lines actually carry a number, so `errorLine: 7` means "line 7 of what
-    I sent" -- you can index into your own `code` directly.
-    
-    Default behavior is to capture the LAST runtime error (the wrapper uses
-    `On Error Resume Next` so all statements run). For a richer pattern that
-    collects every failing line in one round-trip, use an explicit handler:
-    
+    **Requires McpAllowRunVBA** (default: off). The user sets it in the add-in's
+    MCP options form; no tool can change it. To call an existing function,
+    including the add-in's API, use vcs_call_vba instead. Do not call the API
+    from inside this code; the re-entrant call is refused.
+
+    **Errors and line numbers:** the wrapper runs with `On Error Resume Next`
+    and reports the last runtime error. Lines are numbered for you, counting
+    blank lines, comments, and `_` continuations, so `errorLine: 7` is line 7
+    of what you sent. To collect every failing line in one call, use your own
+    handler; `Erl` matches `errorLine`:
+
         Dim col As New Collection
         On Error GoTo H
         CurrentDb.Execute "DELETE * FROM tblA"
-        CurrentDb.Execute "INSERT INTO tblB SELECT * FROM nope"
         CurrentDb.Execute "UPDATE tblC SET x = 1"
         MCP_TempFunction = "errors=" & col.Count
         Exit Function
         H: col.Add Erl & ": " & Err.Number & " " & Err.Description
         Resume Next
-    
-    Each `Erl` value inside the handler is meaningful (and matches an
-    `errorLine` you would have seen) because the wrapper auto-numbered
-    every line for you.
-    
-    **Host-project compile failures:**
-    If the response includes `compileError` stating the host project does not
-    compile on its own, the failure is in existing database VBA — not your
-    submitted `code`. Stop and ask the user to compile in the VBE (Debug →
-    Compile) and paste the code snippet around the highlighted line. Do not
-    treat `generatedSource` as the fix target unless the response says the
-    failure is in the agent code.
-    
+
+    **Host-project compile failures:** `compileError` saying the host project
+    does not compile on its own means the error is in the database's existing
+    VBA, not in your `code`. Run vcs_compile_vba, which returns the failing
+    module and line, rather than editing your snippet.
+
+    **Reset and temporary modules:** before each run the worker resets the host
+    project's VBA and sweeps stale `MCP_Temp_*` modules. A failed reset is
+    fail-closed: your code does not run.
+      - `sweptModules`: stale modules removed before the payload
+      - `temp_module_sweep_failed` + `orphanModules`: stale modules remain;
+        payload not started
+      - `temp_module_unresolvable` + `tempModule`: post-compile canary failed;
+        payload not started
+      - `temp_module_cleanup_failed` + `cleanupFailed` + `orphanModule`: the
+        wrapper survived cleanup; a completed return is kept as `payloadResult`
+    When cleanup fails, stop and tell the user rather than calling again.
+
+    More patterns: vcs_tips("run-vba").
+
     Examples:
         vcs_run_vba("C:\\\\db.accdb", "MCP_TempFunction = CurrentDb.TableDefs.Count")
-        vcs_run_vba("C:\\\\db.accdb", "Dim qd As DAO.QueryDef\\nSet qd = CurrentDb.QueryDefs(\\"qryTest\\")\\nMCP_TempFunction = qd.SQL")
-    
+
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
         code: VBA code to execute (statements, not just an expression)
         timeout_seconds: Optional parent-side timeout. Defaults to
-            ACCESS_VCS_RUN_VBA_TIMEOUT_SEC (45 seconds).
-    
-    Returns:
-        Dictionary with `success`, `result`, and on failure `error`,
-        `error_pattern`, `errorNumber`, and `errorLine` (the 1-based line
-        in `code` that raised the captured error; omitted when not
-        available). Reset, sweep, canary, and cleanup failures include the
-        actionable fields described above.
+            ACCESS_VCS_RUN_VBA_TIMEOUT_SEC (45 seconds). Keep it below the
+            client's request timeout.
     """
     try:
         db_path = validate_database_path(database_path)
@@ -3163,6 +3151,32 @@ def vcs_run_vba(
         return {"success": False, "error": str(e)}
 
 
+# The MCP permissions. The add-in refuses them in SetOption and in session override
+# files too; refusing here as well covers add-in builds older than that check.
+USER_CONTROLLED_OPTIONS = frozenset({
+    "mcpallowrunvba",
+    "mcpallowcallvba",
+    "mcpallowexecutesql",
+    "mcpallowimport",
+})
+
+
+def _is_user_controlled_option(option_name: Any) -> bool:
+    return str(option_name).strip().lower() in USER_CONTROLLED_OPTIONS
+
+
+def _user_controlled_option_refusal(option_name: Any) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": (
+            f"{option_name} is the user's decision. It is set in the add-in's MCP "
+            "options form and cannot be changed through any tool, including "
+            "vcs_call_vba. Ask the user to change it."
+        ),
+        "error_pattern": "user_controlled_option",
+    }
+
+
 @vcs_tool("vcs_set_option")
 def vcs_set_option(
     database_path: str,
@@ -3189,16 +3203,8 @@ def vcs_set_option(
     Returns:
         Dictionary with success status and the option that was set
     """
-    PROTECTED_OPTIONS = {"mcpallowrunvba"}
-    if option_name.lower() in PROTECTED_OPTIONS:
-        return {
-            "success": False,
-            "error": (
-                f"The '{option_name}' option cannot be changed by agents. "
-                "It controls arbitrary VBA code execution and requires explicit "
-                "user consent. Enable it manually in the VCS Options form."
-            ),
-        }
+    if _is_user_controlled_option(option_name):
+        return _user_controlled_option_refusal(option_name)
 
     try:
         db_path = validate_database_path(database_path)
@@ -3423,8 +3429,11 @@ async def vcs_run_tests(
             addin_lib = os.path.splitext(os.path.abspath(addin.addin_path))[0]
             app.Run(f"{addin_lib}.SetInteractionMode", 1)
 
-            # Set the filter option (session-scoped, does not modify user's vcs-options.json)
-            addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
+            command, command_args = _test_run_command(
+                addin.call_sync("GetVCSVersion"), filter
+            )
+            if command == "RunFilteredTests":
+                addin.call_sync("SetOption", "DefaultTestFilter", filter or "")
 
             callback_url = get_callback_url()
             op_manager = _get_operation_manager()
@@ -3433,13 +3442,13 @@ async def vcs_run_tests(
                 op_manager.set_event_loop(asyncio.get_running_loop())
                 operation_id, _queue = op_manager.register_operation(
                     database_path=str(db_path),
-                    command="RunFilteredTests",
+                    command=command,
                 )
                 callback_info = op_manager.create_callback_info(
                     operation_id, callback_url, "cursor"
                 )
                 try:
-                    async_result = addin.call_async(callback_info, "RunFilteredTests")
+                    async_result = addin.call_async(callback_info, command, *command_args)
                     if async_result.get("sync"):
                         op_manager.unregister_operation(operation_id)
                         return _parse_test_runner_json(async_result.get("result"))
@@ -3460,7 +3469,7 @@ async def vcs_run_tests(
                 except Exception:
                     op_manager.unregister_operation(operation_id)
 
-            return _parse_test_runner_json(addin.call_sync("RunFilteredTests"))
+            return _parse_test_runner_json(addin.call_sync(command, *command_args))
 
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -3476,6 +3485,8 @@ async def vcs_capture_screenshot(
     pid: int | None = None,
     max_dimension: int = _screenshot.DEFAULT_MAX_DIMENSION,
     include_image: bool = True,
+    view: Literal["normal", "design"] = "normal",
+    settle_ms: int = _screenshot.DEFAULT_SETTLE_MS,
 ) -> CallToolResult:
     """
     Capture a PNG of a running Access window, plus the text of its dialogs.
@@ -3508,7 +3519,10 @@ async def vcs_capture_screenshot(
     ``open_if_closed=True`` it opens a closed object for the capture and
     closes it without saving. Opening runs the object's event code. Reports
     open in print preview; tables and queries open read-only; only select,
-    crosstab, and union queries are opened.
+    crosstab, and union queries are opened. ``view="design"`` opens a form or
+    report in design view instead, which runs no event code: use it to check
+    a layout changed in source. An object already open is captured as it is,
+    and its view is reported as ``object.current_view``.
 
     Args:
         database_path: Database whose Access window to capture. Optional for
@@ -3522,6 +3536,10 @@ async def vcs_capture_screenshot(
         max_dimension: Longest image edge in pixels (320-3840). Images are
             scaled down, never up.
         include_image: False returns the metadata and dialog text only.
+        view: "normal" (default) or "design", for forms and reports opened
+            with open_if_closed.
+        settle_ms: Wait after opening an object before capturing (0-5000,
+            default 150). Raise it when an opened form shows blank controls.
 
     Returns:
         A JSON metadata block (``success``, ``pid``, ``owned_by_server``,
@@ -3550,6 +3568,8 @@ async def vcs_capture_screenshot(
         max_dimension=max_dimension,
         include_image=include_image,
         get_gate=get_access_gate,
+        view=view,
+        settle_ms=settle_ms,
     )
 
 

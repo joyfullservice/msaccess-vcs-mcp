@@ -453,11 +453,80 @@ def fake_access(monkeypatch):
     shot._pending_cleanup.clear()
 
 
-def _request(object_type="form", name="frmExample", open_if_closed=False, target="object"):
+def _request(object_type="form", name="frmExample", open_if_closed=False, target="object",
+             view="normal", settle_ms=0):
     return shot.ObjectRequest(
         database_path=DB, pid=10, target=target, object_type=object_type, object_name=name,
         open_if_closed=open_if_closed, max_dimension=1568, include_image=True,
+        view=view, settle_ms=settle_ms,
     )
+
+
+@pytest.mark.parametrize(
+    "object_type,name,expected_open",
+    [
+        ("form", "frmExample", ("OpenForm", "frmExample", shot.AC_DESIGN)),
+        ("report", "rptExample", ("OpenReport", "rptExample", shot.AC_VIEW_DESIGN)),
+    ],
+)
+def test_design_view_opens_in_design_and_closes_without_saving(
+    fake_access, object_type, name, expected_open
+):
+    fake_access.app = FakeAccess(forms=["frmExample"], reports=["rptExample"])
+    result = shot.capture_object_sync(
+        _request(object_type, name, open_if_closed=True, view="design")
+    )
+    assert fake_access.app.opens() == [expected_open]
+    ac_type = shot.AC_OBJECT_TYPES[object_type]
+    assert fake_access.app.closes() == [("Close", ac_type, name, shot.AC_SAVE_NO)]
+    assert result["outcome"].meta["object"]["view"] == "design"
+
+
+def test_open_form_reports_current_view(fake_access, monkeypatch):
+    fake_access.app = FakeAccess(forms=["frmExample"], loaded=["frmExample"])
+    monkeypatch.setattr(
+        fake_access.app, "Forms",
+        lambda name: SimpleNamespace(Hwnd=0x600, Visible=True, Name=name, CurrentView=1),
+    )
+    result = shot.capture_object_sync(_request(view="design"))
+    meta = result["outcome"].meta["object"]
+    assert meta["current_view"] == "form"
+    assert "already open in form view" in meta["note"]
+    assert fake_access.app.opens() == []
+
+
+def test_open_form_in_design_has_no_note(fake_access, monkeypatch):
+    fake_access.app = FakeAccess(forms=["frmExample"], loaded=["frmExample"])
+    monkeypatch.setattr(
+        fake_access.app, "Forms",
+        lambda name: SimpleNamespace(Hwnd=0x600, Visible=True, Name=name, CurrentView=0),
+    )
+    meta = shot.capture_object_sync(_request(view="design"))["outcome"].meta["object"]
+    assert meta["current_view"] == "design"
+    assert "note" not in meta
+
+
+def test_settle_ms_waits_after_opening(fake_access, monkeypatch):
+    waits = []
+    monkeypatch.setattr(shot.time, "sleep", lambda seconds: waits.append(seconds))
+    fake_access.app = FakeAccess(forms=["frmExample"])
+    shot.capture_object_sync(_request(open_if_closed=True, settle_ms=1200))
+    assert 1.2 in waits
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"view": "sideways"}, "view must be"),
+    ({"view": "design", "object_type": "table"}, "forms and reports"),
+    ({"settle_ms": -1}, "settle_ms"),
+    ({"settle_ms": shot.MAX_SETTLE_MS + 1}, "settle_ms"),
+])
+def test_view_and_settle_validation(kwargs, message):
+    args = {"view": "normal", "settle_ms": 0, "object_type": "form", **kwargs}
+    with pytest.raises(shot.ScreenshotError, match=message):
+        shot.validate_arguments(
+            DB, "object", args["object_type"], "frmExample", True, None, 1568,
+            args["view"], args["settle_ms"],
+        )
 
 
 def test_open_form_is_captured(fake_access):

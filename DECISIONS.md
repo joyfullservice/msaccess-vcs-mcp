@@ -74,6 +74,92 @@ contradictory guidance.
 
 ---
 
+## 2026-11-24 — Rules in the instructions, next steps in results, depth in vcs_tips
+
+**Trigger**: The server instructions had grown to 10,205 characters. Claude
+Code cuts instructions at 4,096 (2,048 before v2.1.296), so its users lost
+everything after the middle of the installed-add-in section: compile
+failures, "Access seems stuck", the tool reference, and the logs. The OpenAI
+Agents SDK and LangChain adapters do not document passing instructions to
+the model at all. `vcs_run_vba`'s description (4,134) also crossed the limit
+for a tool loaded upfront.
+
+**Options explored**:
+- Trim the instructions in place: rejected alone. It fits Claude Code but
+  still leaves clients that drop instructions with nothing at failure time.
+- Move everything into tool descriptions: rejected. Descriptions load late in
+  Claude Code (through tool search) and the same rule would repeat in many.
+- A `hint` field per failure site, as before: rejected. Only three sites had
+  one, each worded differently, and none named the call to make.
+- **Chosen**: three layers. The instructions keep the rules every call needs
+  (installed add-in, no parallel calls, the stuck-Access call, `vcs_tips`
+  triggers) in the first 2,000 characters and stay under 3,500; they survive
+  context compaction in long sessions. Failed results carry one
+  `agent_guidance` sentence with the exact next call, added centrally in the
+  `vcs_tool` wrapper by `error_pattern` unless the result already has its
+  own. `vcs_tips(topic)` serves packaged markdown topics on demand; it is
+  gate-exempt so `stuck` answers while Access is blocked, and it is the only
+  tool marked `anthropic/alwaysLoad` so Claude Code agents see it without a
+  search.
+
+**Decision**: Durable rules in the instructions, failure guidance in results,
+situational depth in `vcs_tips`. The cost is three places to keep in step;
+`tests/test_agent_text.py` checks lengths, placement, and that every tool
+name and topic mentioned exists.
+
+**What this rules out**: Growing the instructions back into a manual, and a
+second guidance field (`hint`, `tips_topic`). Guidance never goes in `error`,
+which the usage log records. Revisit the limits if Claude Code changes them.
+
+**Relevant files**: `src/msaccess_vcs_mcp/tools.py` (`SERVER_INSTRUCTIONS`,
+`vcs_tips`, `vcs_tool`), `src/msaccess_vcs_mcp/guidance.py`,
+`src/msaccess_vcs_mcp/tips.py`, `src/msaccess_vcs_mcp/tips/`,
+`tests/test_guidance.py`, `tests/test_agent_text.py`.
+
+---
+
+## 2026-11-24 — No tool can change the McpAllow* permissions
+
+**Trigger**: `vcs_set_option` refused `McpAllowRunVBA`, but
+`vcs_call_vba(db, "VCS.API", ["SetOption", "McpAllowRunVBA", "True"])`
+reached the add-in's `SetOption` directly and turned it on. The add-in also
+merged `McpAllow*` keys from session override files in `mcp/`, which an agent
+can write with ordinary file tools. The other three permissions
+(`McpAllowCallVBA`, `McpAllowExecuteSQL`, `McpAllowImport`) were not
+protected at all.
+
+**Options explored**:
+- Keep the Python-only list and add a matching check in `vcs_call_vba`:
+  rejected as the only fence. Any caller of the add-in API, and any override
+  file, would still get through.
+- Detect "called from MCP" in the add-in and refuse only then: rejected. VBA
+  cannot tell its caller apart reliably, and the user never needs an API
+  route to these options; the MCP options form is where they are set.
+- **Chosen**: the add-in refuses all four in `SetOption` and ignores them in
+  override files (`clsOptions.IsUserControlledOption`). The server refuses
+  them too, in `vcs_set_option` and in `vcs_call_vba` calls to `SetOption`,
+  so an add-in build older than this check is still covered for the direct
+  routes. Every refusal returns `error_pattern: user_controlled_option` and
+  tells the agent to ask the user.
+
+**Decision**: The permissions are the user's decision, enforced in the
+add-in, with the server as a second check.
+
+**What this rules out**: Agents enabling a permission for a session, even
+temporarily. The fence is not complete: the project's `vcs-options.json`
+holds these options and is an ordinary file in the export folder, and
+importing VBA then calling it through `vcs_call_vba` is code execution
+whatever `McpAllowRunVBA` says. `ACCESS_VCS_DISABLE_WRITES` refuses import
+and rebuild, which closes that route, but it does not gate `vcs_call_vba` or
+`vcs_run_vba`; the README spells out both limits. Revisit if the options file
+moves out of agent reach.
+
+**Relevant files**: `src/msaccess_vcs_mcp/tools.py` (`USER_CONTROLLED_OPTIONS`),
+`tests/test_user_controlled_options.py`. Add-in side: `clsOptions.cls`,
+`clsVersionControl.cls` (`SetOption`).
+
+---
+
 ## 2026-11-24 — Answer dialogs and reset break mode only on server-created Access
 
 **Trigger**: Screenshots made dialogs and break mode visible to agents, but
@@ -1067,6 +1153,11 @@ That started as an `Err.Raise` and had to be changed after testing. An error rai
 ---
 
 ## 2026-04-15 — Agents cannot enable McpAllowRunVBA programmatically
+
+> **⚠ Superseded** (2026-11-24): `vcs_call_vba` could reach the add-in's
+> `SetOption` and bypass this server-only list. The add-in now refuses all four
+> `McpAllow*` options itself, without needing to know its caller. See "No tool
+> can change the McpAllow* permissions" above.
 
 **Trigger**: The `vcs_set_option` tool allowed agents to set any VCS option, including `McpAllowRunVBA` which gates arbitrary VBA code execution via `vcs_run_vba`. An agent could autonomously enable this option and then run arbitrary code without user awareness, undermining the security boundary that `McpAllowRunVBA` was designed to provide.
 

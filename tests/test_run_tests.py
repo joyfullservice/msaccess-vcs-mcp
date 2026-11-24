@@ -107,11 +107,12 @@ SAMPLE_RESULTS_EMPTY = {
 }
 
 
-def _build_mocks(tmp_path, call_sync_return=None):
+def _build_mocks(tmp_path, call_sync_return=None, version="5.1.0"):
     """Build the mock objects needed for vcs_run_tests tests.
 
-    Returns (mock_app, mock_addin, addin_path) where call_sync is
-    pre-configured with the given return value.
+    Returns (mock_app, mock_addin, addin_path) where call_sync answers
+    GetVCSVersion with ``version`` and every other call with the given
+    return value. The default version predates RunTestsMatching.
     """
     addin_file = tmp_path / "Version Control.accda"
     addin_file.touch()
@@ -128,7 +129,9 @@ def _build_mocks(tmp_path, call_sync_return=None):
     mock_addin = Mock()
     mock_addin.addin_path = str(addin_file)
     mock_addin.load_addin.return_value = True
-    mock_addin.call_sync.return_value = call_sync_return
+    mock_addin.call_sync.side_effect = (
+        lambda command, *args: version if command == "GetVCSVersion" else call_sync_return
+    )
 
     return mock_app, mock_conn, mock_addin
 
@@ -147,15 +150,15 @@ def _unwrap(tool_fn):
     return fn
 
 
-def _call_run_tests(tmp_path, call_sync_return, filter_value=None):
+def _call_run_tests(tmp_path, call_sync_return, filter_value=None, version="5.1.0"):
     """Call vcs_run_tests with fully mocked COM layer (sync fallback).
 
     Patches AccessConnection, VCSAddinIntegration, validate_database_path,
     and get_config so the tool body runs against mock objects. Callbacks
-    are disabled so the old add-in path (call_sync RunFilteredTests) is used.
+    are disabled so the sync path (call_sync) is used.
     """
     mock_app, mock_conn, mock_addin = _build_mocks(
-        tmp_path, call_sync_return=call_sync_return
+        tmp_path, call_sync_return=call_sync_return, version=version
     )
 
     db_path = str(tmp_path / "test.accdb")
@@ -349,18 +352,61 @@ class TestRunTestsCallOrder:
             f"{addin_lib}.SetInteractionMode", 1
         )
 
-        # SetOption + RunFilteredTests go through call_sync
+        # GetVCSVersion + SetOption + RunFilteredTests go through call_sync
         calls = mock_addin.call_sync.call_args_list
-        assert len(calls) == 2
-        assert calls[0] == call("SetOption", "DefaultTestFilter", "SQL,-slow")
-        assert calls[1] == call("RunFilteredTests")
+        assert calls == [
+            call("GetVCSVersion"),
+            call("SetOption", "DefaultTestFilter", "SQL,-slow"),
+            call("RunFilteredTests"),
+        ]
 
         mock_addin.load_addin.assert_called_once()
 
 
-def _call_run_tests_async(tmp_path, *, completion, filter_value=None, results=None):
+class TestRunTestsMatching:
+    """Add-ins with RunTestsMatching get the filter as an argument, not an option."""
+
+    @pytest.mark.parametrize("filter_value, expected", [("SQL,-slow", "SQL,-slow"), (None, "")])
+    def test_filter_passed_without_set_option(self, tmp_path, filter_value, expected):
+        result, _, mock_addin = _call_run_tests(
+            tmp_path,
+            call_sync_return=json.dumps(SAMPLE_RESULTS_ALL_PASS),
+            filter_value=filter_value,
+            version="5.2.0",
+        )
+
+        assert result["success"] is True
+        assert mock_addin.call_sync.call_args_list == [
+            call("GetVCSVersion"),
+            call("RunTestsMatching", expected),
+        ]
+
+    @pytest.mark.parametrize("version", ["5.1.0", "4.1.0", "", None, "not a version"])
+    def test_older_or_unknown_version_uses_option(self, version):
+        from msaccess_vcs_mcp.tools import _test_run_command
+
+        assert _test_run_command(version, "SQL") == ("RunFilteredTests", ())
+
+    def test_async_path_passes_filter(self, tmp_path):
+        result, _, mock_addin, op_manager = _call_run_tests_async(
+            tmp_path,
+            completion={"success": True, "message": "Operation completed successfully"},
+            results=SAMPLE_RESULTS_ALL_PASS,
+            filter_value="modTestFoo",
+            version="5.2.0",
+        )
+
+        assert result["success"] is True
+        assert mock_addin.call_async.call_args[0][1:] == ("RunTestsMatching", "modTestFoo")
+        assert op_manager.register_operation.call_args.kwargs["command"] == "RunTestsMatching"
+        mock_addin.call_sync.assert_called_once_with("GetVCSVersion")
+
+
+def _call_run_tests_async(
+    tmp_path, *, completion, filter_value=None, results=None, version="5.1.0"
+):
     """Call vcs_run_tests on the APIAsync callback path."""
-    mock_app, mock_conn, mock_addin = _build_mocks(tmp_path)
+    mock_app, mock_conn, mock_addin = _build_mocks(tmp_path, version=version)
     mock_addin.call_async.return_value = {"async": True, "timeout_ms": 1000}
 
     payload = dict(completion)
@@ -414,7 +460,7 @@ class TestRunTestsAsync:
         assert result["summary"]["subs"] == 5
         mock_addin.call_async.assert_called_once()
         assert mock_addin.call_async.call_args[0][1] == "RunFilteredTests"
-        mock_addin.call_sync.assert_called_once_with("SetOption", "DefaultTestFilter", "")
+        mock_addin.call_sync.assert_called_with("SetOption", "DefaultTestFilter", "")
 
     def test_failed_suite_still_returns_json(self, tmp_path):
         """eorFailed posts type error; results_path still carries the suite JSON."""
