@@ -74,6 +74,76 @@ contradictory guidance.
 
 ---
 
+## 2026-11-27 — User setting decisions: asked deliberately, saved per user
+
+**Trigger**: Screenshot retention silently defaulted to 30 days. A user who
+wanted screenshots kept longer, or forever, learned the default only when an
+image in an old chat broke. The question was whether an MCP server can show a
+settings screen on first run or upgrade. MCP has no first-run or upgrade
+event, so the server has to choose when to ask.
+
+**Options explored**:
+- Open a form (MCP elicitation) inside the first tool call after install or
+  upgrade: rejected after a three-model review. It blocks an unrelated agent
+  call on a human. The SDK says an agent client may answer a form itself,
+  and Claude Code hooks can answer one unseen. Cursor's `cursor-agent`
+  declares form support and declines every request unseen (Cursor forum).
+  Headless runs and subagents have nobody to answer. The server restarts
+  about every 6.8 minutes, so "once per process" would mean nagging.
+- Save the defaults when a form is declined: rejected. A decline,
+  especially an automatic one, is not the human choosing the defaults.
+- A setup notice on every result until settled: rejected. It reaches the
+  agent, not the human, would be a second guidance field, and repeats on
+  every restart.
+- URL elicitation to a local settings page: rejected. Narrower client
+  support, and HTTP lifecycle work for one non-secret number.
+- Fill unset environment variables from the settings file at startup:
+  rejected. The workspace-roots `.env` load uses `override=False`, so the
+  settings file would beat the project's `.env`.
+- MCP bundle `user_config`: Claude Desktop only.
+- **Chosen**: `user_settings.py` stores decisions in
+  `~/.msaccess-vcs-mcp/settings.json`, read through `get_setting` (environment,
+  then file, then default) without writing to `os.environ`. A decision is
+  made in one of three ways: `vcs_configure` (a form when called on purpose,
+  or a value the agent relays from the user), `msaccess-vcs configure` in a
+  terminal, or the agent asking after `vcs_capture_screenshot` saves an
+  image while retention is pending. Each entry records `decided_by`.
+  `{"decision": "default"}` follows a later change to the default.
+- Retention values: `0` for "keep forever" (the original environment
+  meaning) was rejected after a live test, because "0 days" reads as "delete
+  at once". `0` for never and `-1` for forever were rejected too: both have to
+  be learned, and an agent guessing their meaning gets it backwards. The
+  setting takes words, `never` or `forever`, or whole days of 1 or more, and
+  every source (form, agent, CLI, environment) uses the one parser. `never`
+  means nothing is saved: `save_image=True` still returns the inline image,
+  with a warning, and earlier `vcs-shot-` files are deleted. The form is one
+  plain-enum dropdown (Never, 7 days, 30 days (default), Forever), plus a
+  "(current)" choice for another day count saved through the agent or CLI.
+  The setting was renamed from `..._RETENTION_DAYS` with no alias, because
+  nobody had used it yet.
+
+**Decision**: Ask deliberately, at the point of relevance. A successful
+result may now carry `agent_guidance` when it needs a decision from the
+user. This is the one widening of the 2026-11-24 rule that kept guidance to
+failed results, and it still adds no second field.
+
+**What this rules out**: Asking inside the call wrapper, or from a tool whose
+results do not depend on the setting. Audit and security switches
+(`ACCESS_VCS_ENABLE_LOGGING`, the `McpAllow*` options) in
+`DECISION_SETTINGS`, because an agent answering for the user could turn off
+its own audit trail. Version bookkeeping for upgrades: a key with no entry is
+pending. Revisit when the SDK moves to the 2026-07-28 multi-round-trip
+`input_required` flow; `settings_form._ask` is the only call site.
+
+**Relevant files**: `src/msaccess_vcs_mcp/user_settings.py`,
+`src/msaccess_vcs_mcp/settings_form.py`, `src/msaccess_vcs_mcp/screenshot.py`
+(`_add_retention`), `src/msaccess_vcs_mcp/screenshot_store.py`
+(`retention_days`), `src/msaccess_vcs_mcp/tools.py` (`vcs_configure`,
+`vcs_get_version_info`), `src/msaccess_vcs_mcp/cli.py` (`configure`),
+`src/msaccess_vcs_mcp/access_gate.py`, `tests/test_user_settings.py`.
+
+---
+
 ## 2026-11-27 — Publish to PyPI from a GitHub Release, locked with uv
 
 **Trigger**: The README told users to install with
@@ -172,6 +242,11 @@ much sooner.
 `src/msaccess_vcs_mcp/tools.py` (`vcs_capture_screenshot`, `vcs_tool`),
 `tests/conftest.py`, `tests/test_screenshot_tool.py`.
 
+> **⚠ Partially superseded** (2026-11-27): retention is now
+> `ACCESS_VCS_SCREENSHOT_RETENTION`, a user setting that takes `never`,
+> `forever`, or whole days; `0` no longer means "keep them". See "User
+> setting decisions: asked deliberately, saved per user" above.
+
 ---
 
 ## 2026-11-24 — Rules in the instructions, next steps in results, depth in vcs_tips
@@ -206,6 +281,10 @@ for a tool loaded upfront.
 situational depth in `vcs_tips`. The cost is three places to keep in step;
 `tests/test_agent_text.py` checks lengths, placement, and that every tool
 name and topic mentioned exists.
+
+> **⚠ Partially superseded** (2026-11-27): a successful result may also
+> carry `agent_guidance` when it needs a decision from the user. See "User
+> setting decisions: asked deliberately, saved per user" above.
 
 **What this rules out**: Growing the instructions back into a manual, and a
 second guidance field (`hint`, `tips_topic`). Guidance never goes in `error`,

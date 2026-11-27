@@ -90,6 +90,8 @@ from .rebuild_watcher import (
 from .operation_manager import MonotonicProgressReporter
 from . import screenshot as _screenshot
 from . import screenshot_store as _screenshot_store
+from . import settings_form as _settings_form
+from . import user_settings as _user_settings
 from .vba_worker_manager import get_build_timeout, get_call_vba_timeout, run_vba_resilient
 
 _COMPILE_FAILURE_AGENT_GUIDANCE = (
@@ -2158,6 +2160,9 @@ async def vcs_get_version_info(
           if the always-on diagnostic stream has been opted out)
         - log_code_content: Boolean -- whether ``code_execution`` events
           record the full SQL/VBA body or only ``code_length``
+        - settings_path, settings, pending_settings: the user-level settings
+          file, each setting's value and source, and the ones still undecided
+          (see vcs_configure)
         - errors: List of validation errors
         - warnings: List of validation warnings
     """
@@ -2185,12 +2190,51 @@ async def vcs_get_version_info(
         os.getenv("ACCESS_VCS_LOG_CODE_CONTENT", "false").lower() == "true"
     )
 
+    result["settings_path"] = str(_user_settings.settings_path())
+    result["settings"] = _user_settings.describe_all()
+    result["pending_settings"] = _user_settings.pending_settings()
+
     if not callback_url:
         result["warnings"] = result.get("warnings", []) + [
             "Callback server not running - async operations will fall back to sync mode"
         ]
 
     return result
+
+
+@vcs_tool("vcs_configure")
+async def vcs_configure(
+    screenshot_retention: int | str | None = None,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """
+    Record the user's choice for settings that need one, such as how long saved
+    screenshots are kept. Pass only a value the user chose; never choose for them.
+
+    With no arguments, returns each setting with its value, where the value came
+    from (env, settings_file, or default), and whether it is decided. When the
+    client can show forms, it also opens a form for the user; declining or
+    closing the form saves nothing. With a value, validates and saves it.
+
+    Choices are saved per user in ~/.msaccess-vcs-mcp/settings.json and apply to
+    every project. A value set in mcp.json or a .env file wins over the saved one.
+    In a terminal, `msaccess-vcs configure` does the same.
+
+    Args:
+        screenshot_retention: How long a screenshot saved with save_image=True
+            is kept: "never" (save none), "forever", a whole number of days, or
+            "default" (30 days, following the default if it changes).
+
+    Returns:
+        ``settings``, ``pending_settings``, ``settings_path``, and ``saved`` (the
+        names saved). ``form`` is ``accepted``, ``declined``, ``cancelled``,
+        ``timeout``, ``unavailable``, ``failed``, or ``not_needed`` when no value
+        was passed.
+    """
+    values: dict[str, Any] = {}
+    if screenshot_retention is not None:
+        values[_user_settings.SCREENSHOT_RETENTION.name] = screenshot_retention
+    return await _settings_form.configure(ctx, values)
 
 
 @vcs_tool("vcs_get_recent_calls")
@@ -3556,7 +3600,10 @@ async def vcs_capture_screenshot(
         save_image: Also write the PNG to the server's screenshot folder and
             return ``image.saved_path`` and ``image.markdown``; paste the
             markdown into your reply to show the user. Keep include_image=True
-            when you will describe it. Saved files expire (30 days by default).
+            when you will describe it. Saved files expire (30 days by default;
+            ``image.retention`` gives the date and whether the user chose it).
+            If the user chose never to keep screenshots, nothing is saved and
+            a warning says so.
 
     Returns:
         A JSON metadata block (``success``, ``pid``, ``owned_by_server``,

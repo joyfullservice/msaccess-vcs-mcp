@@ -22,6 +22,7 @@ from mcp.types import CallToolResult
 import msaccess_vcs_mcp.screen_capture as sc
 import msaccess_vcs_mcp.screenshot as shot
 import msaccess_vcs_mcp.screenshot_store as store
+import msaccess_vcs_mcp.user_settings as user_settings
 from msaccess_vcs_mcp.screen_capture import Rect, WindowInfo
 
 DB = r"C:\path\to\example.accdb"
@@ -906,7 +907,7 @@ def test_prune_deletes_only_expired_screenshots(screenshot_dir):
 
 def test_zero_retention_keeps_everything(screenshot_dir):
     old = _touch(screenshot_dir, OLD_SHOT, 400)
-    assert store.prune_expired(screenshot_dir, 0) == 0
+    assert store.prune_expired(screenshot_dir, None) == 0
     assert old.exists()
 
 
@@ -914,6 +915,52 @@ def test_save_prunes_expired_files(routing, screenshot_dir):
     old = _touch(screenshot_dir, OLD_SHOT, 31)
     _run(save_image=True, get_gate=lambda: None)
     assert not old.exists()
+
+
+def test_saved_image_reports_retention_and_asks_while_undecided(routing):
+    meta = meta_of(_run(save_image=True, get_gate=lambda: None))
+    retention = meta["image"]["retention"]
+    assert retention["days"] == 30 and retention["decided"] is False
+    assert retention["forever"] is False
+    assert retention["expires_at"]
+    assert meta["agent_guidance"] == shot.RETENTION_UNDECIDED_GUIDANCE
+    assert "vcs_configure(screenshot_retention=" in meta["agent_guidance"]
+
+
+def test_no_retention_guidance_once_the_user_has_decided(routing):
+    user_settings.save({"screenshot_retention": "forever"}, "agent")
+    meta = meta_of(_run(save_image=True, get_gate=lambda: None))
+    assert meta["image"]["retention"] == {
+        "days": None, "forever": True, "expires_at": None, "decided": True,
+    }
+    assert "agent_guidance" not in meta
+
+
+def test_forever_keeps_old_screenshots_on_save(routing, screenshot_dir):
+    old = _touch(screenshot_dir, OLD_SHOT, 400)
+    user_settings.save({"screenshot_retention": "forever"}, "cli")
+    _run(save_image=True, get_gate=lambda: None)
+    assert old.exists()
+
+
+def test_never_saves_nothing_and_removes_earlier_saves(routing, screenshot_dir):
+    old = _touch(screenshot_dir, NEW_SHOT, 0)
+    other = _touch(screenshot_dir, "notes.png", 0)
+    user_settings.save({"screenshot_retention": "never"}, "form")
+    result = _run(save_image=True, get_gate=lambda: None)
+    meta = meta_of(result)
+    assert "saved_path" not in meta.get("image", {})
+    assert shot.SAVE_NEVER_WARNING in meta["warnings"]
+    assert "agent_guidance" not in meta
+    assert [c.type for c in result.content] == ["text", "image"]
+    assert not old.exists() and other.exists()
+    assert sorted(p.name for p in screenshot_dir.iterdir()) == ["notes.png"]
+
+
+def test_no_retention_notice_when_nothing_is_saved(routing):
+    meta = meta_of(_run(include_image=False, get_gate=lambda: None))
+    assert "retention" not in meta.get("image", {})
+    assert "agent_guidance" not in meta
 
 
 def test_locked_or_vanished_files_are_skipped(screenshot_dir, monkeypatch):
@@ -932,9 +979,12 @@ def test_locked_or_vanished_files_are_skipped(screenshot_dir, monkeypatch):
     assert store.prune_expired(screenshot_dir / "missing", 30) == 0
 
 
-@pytest.mark.parametrize("value, expected", [("7", 7.0), ("0", 0.0), ("nope", 30.0), ("-1", 30.0)])
+@pytest.mark.parametrize("value, expected", [
+    ("7", 7.0), ("forever", None), ("Forever", None), ("never", 0.0),
+    ("0", 30.0), ("-1", 30.0), ("0.5", 30.0), ("nope", 30.0),
+])
 def test_retention_days_env(monkeypatch, value, expected):
-    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", value)
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION", value)
     assert store.retention_days() == expected
 
 
@@ -954,18 +1004,25 @@ def test_markdown_link_encodes_special_characters():
 
 def test_prune_once_uses_the_settings_in_force_and_runs_once(screenshot_dir, monkeypatch):
     old = _touch(screenshot_dir, OLD_SHOT, 10)
-    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", "5")
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION", "5")
     thread = store.start_prune_once()
     thread.join(5)
     assert not old.exists()
     assert store.start_prune_once() is None
 
 
-def test_prune_once_keeps_files_when_retention_is_zero(screenshot_dir, monkeypatch):
+def test_prune_once_keeps_files_when_retention_is_forever(screenshot_dir, monkeypatch):
     old = _touch(screenshot_dir, OLD_SHOT, 400)
-    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", "0")
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION", "forever")
     assert store.start_prune_once() is None
     assert old.exists()
+
+
+def test_prune_once_removes_everything_when_retention_is_never(screenshot_dir, monkeypatch):
+    recent = _touch(screenshot_dir, NEW_SHOT, 0)
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION", "never")
+    store.start_prune_once().join(5)
+    assert not recent.exists()
 
 
 def test_prune_once_never_creates_the_folder(screenshot_dir):

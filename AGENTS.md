@@ -64,6 +64,8 @@ msaccess-vcs-mcp/
 │   ├── guidance.py             # agent_guidance added to failed results
 │   ├── access_state.py         # Dialogs and break mode attached to timeouts
 │   ├── shared_open.py          # Import warnings when another session holds the database
+│   ├── user_settings.py        # User-level setting decisions and their resolver
+│   ├── settings_form.py        # vcs_configure: form or relayed values
 │   ├── tips.py                 # vcs_tips topic loader
 │   ├── tips/                   # vcs_tips topics, one markdown file each
 │   └── access_com/             # Low-level COM/DAO helpers
@@ -96,7 +98,7 @@ AI Agent ──► MCP Server (Python) ──► VCS Add-in (VBA) ──► Acce
 Claude Code cuts server instructions, and any tool description it loads upfront, at 4,096 characters; some other clients never show the instructions to the model. Guidance is split three ways so nothing an agent needs depends on the instructions surviving:
 
 - **Instructions** (`SERVER_INSTRUCTIONS` in `tools.py`, 3,500 characters or fewer): the rules every call needs, with the installed-add-in rule, no parallel calls, the stuck-Access call, and the `vcs_tips` triggers in the first 2,000 characters. No tool reference; every client lists the tools.
-- **Results**: a failed result carries `agent_guidance`, one sentence naming the next call. `guidance.py` fills it in the `vcs_tool` wrapper from `error_pattern` (and a refused `vcs_rebuild_addin`) when the code that built the result did not. Never put guidance or dialog text in `error`; the usage log records that field. On `timeout` and `access_unresponsive`, `access_state.py` also attaches `access_state` (`pid`, `owned_by_server`, `vbe_state`, `modal_blocked`, `dialogs` with text capped at 500 characters) and guidance naming the `dialog_id` or `vcs_reset_vba()`. It reads windows only, through the screenshot resolver, under a 5-second deadline, and only when the call named a database (for `vcs_rebuild_addin`, the development copy beside `source_dir`), because the resolver's single-instance shortcut could describe an unrelated window.
+- **Results**: a failed result carries `agent_guidance`, one sentence naming the next call. A successful result carries it only when it needs a decision from the user (see [User settings](#user-settings)). `guidance.py` fills it in the `vcs_tool` wrapper from `error_pattern` (and a refused `vcs_rebuild_addin`) when the code that built the result did not. Never put guidance or dialog text in `error`; the usage log records that field. On `timeout` and `access_unresponsive`, `access_state.py` also attaches `access_state` (`pid`, `owned_by_server`, `vbe_state`, `modal_blocked`, `dialogs` with text capped at 500 characters) and guidance naming the `dialog_id` or `vcs_reset_vba()`. It reads windows only, through the screenshot resolver, under a 5-second deadline, and only when the call named a database (for `vcs_rebuild_addin`, the development copy beside `source_dir`), because the resolver's single-instance shortcut could describe an unrelated window.
 - **`vcs_tips(topic)`**: depth for one situation, from the files in [src/msaccess_vcs_mcp/tips/](src/msaccess_vcs_mcp/tips/): [addin-development](src/msaccess_vcs_mcp/tips/addin-development.md), [stuck](src/msaccess_vcs_mcp/tips/stuck.md), [compile](src/msaccess_vcs_mcp/tips/compile.md), [logs](src/msaccess_vcs_mcp/tips/logs.md), [run-vba](src/msaccess_vcs_mcp/tips/run-vba.md). Gate-exempt, and the only tool registered with `meta={"anthropic/alwaysLoad": True}`.
 
 `tests/test_agent_text.py` enforces the limits and checks that every `vcs_*` name and `vcs_tips` topic mentioned anywhere exists. When a behaviour described in a topic changes, update the topic in the same change.
@@ -135,13 +137,26 @@ Key variables:
 - `ACCESS_VCS_REBUILD_TIMEOUT_SEC` — how long `vcs_rebuild_addin` waits after launch for a terminal status (default 1200s)
 - `ACCESS_VCS_SCREENSHOT_OPEN_TIMEOUT_SEC` — how long `vcs_capture_screenshot` waits for an `open_if_closed` open before returning `open_blocked` (default 10s)
 - `ACCESS_VCS_SCREENSHOT_DIR` — where `save_image=True` writes screenshots (default `~/.msaccess-vcs-mcp/screenshots/`)
-- `ACCESS_VCS_SCREENSHOT_RETENTION_DAYS` — days a saved screenshot is kept before it is deleted (default 30; `0` keeps them forever)
+- `ACCESS_VCS_SCREENSHOT_RETENTION` — how long a saved screenshot is kept: `never` (saves none), `forever`, or whole days (default 30). No number stands for a policy. Usually a user setting (below); a value here wins over it.
+- `ACCESS_VCS_SETTINGS_PATH` — where user setting decisions are saved (default `~/.msaccess-vcs-mcp/settings.json`)
 - `ACCESS_VCS_COMPILE_TIMEOUT_SEC` — how long `vcs_compile_vba` waits for the editor's compile to succeed or show its error before returning `compile_timeout` (default 120s)
 - `ACCESS_VCS_BUSY_WAIT_SEC` — how long a second tool call waits for the Access gate before returning `server_busy` (default 15s)
 - `ACCESS_VCS_RECOVERY_PROBE_TIMEOUT_SEC` — timeout for automatic Access/add-in recovery probes after a VBA timeout or COM disconnect (default 10s)
 - `ACCESS_VCS_LEAVE_ACCESS_OPEN` — when `true` (the default), a COM-created Access instance is not Quit on disconnect so a later attach can reuse the boosted process. The user closes the window. Set `false` to restore quit-per-call. The server still closes instances it created when a rebuild must replace a file they hold, or when recycling a stuck owned instance after a failed recovery probe. User-owned Access is never closed.
 - `ACCESS_VCS_CLOSE_TIMEOUT_SEC` — how long a graceful close of a server-created instance may take before it is force-terminated (default 10s)
 - `ACCESS_VCS_OWNED_INSTANCES_PATH` — where the ownership registry lives (default `~/.msaccess-vcs-mcp/owned-instances.json`)
+
+### User settings
+
+A few settings get an explicit decision from the user instead of a silent default; `DECISION_SETTINGS` in `user_settings.py` lists them (today only screenshot retention). Decisions live per user in `settings.json`, because one server process serves every window and a per-project file would ask in every repository.
+
+- **Read through `get_setting(key)`, never `os.environ` alone.** The order is environment (`mcp.json`, `.env`, `.env.local`), then `settings.json`, then the default. Nothing is written into `os.environ`: the workspace-roots `.env` load uses `override=False`, so a pre-filled value would beat the project's `.env`. The file is re-read when its modification time changes, so a change from the CLI or another server process applies on the next read.
+- **Writes merge under a lock file** (`settings.json.lock`, cleared after 30 seconds) and replace the file atomically. Unknown keys are kept. An unreadable file is renamed to `settings.json.corrupt-*` and treated as empty.
+- **Only a deliberate answer is a decision.** Each entry records `decided_by` (`form`, `agent`, or `cli`). `{"decision": "default"}` follows the built-in default even if a later release changes it. A form that is declined, cancelled, or times out saves nothing. A key with no entry is pending, which is also how a setting added in a later release is detected.
+- **Never ask inside an unrelated call.** `vcs_configure` (gate-exempt, `settings_form.py`) is the only place the server elicits. Check `elicitation.form` directly, because the SDK's `check_client_capability` accepts a URL-only client. Choice fields need `str` with an `enum` in `json_schema_extra`, because `Literal` fails the SDK's schema check. Without form support, it returns `agent_guidance` telling the agent to ask the user and pass the answer.
+- **Surface a pending setting where it matters.** `vcs_capture_screenshot` adds `image.retention` (days, `expires_at`, `decided`) to every saved image, plus `agent_guidance` while retention is pending. Under `never` it saves nothing, warns, and deletes earlier `vcs-shot-` files. A new decision setting needs the same hook in the tool whose results depend on it, not a notice on every call.
+- **Keep audit and security switches out of the registry.** An agent answering for the user could otherwise turn off `ACCESS_VCS_ENABLE_LOGGING`.
+- `msaccess-vcs configure` (`--show`, `--set NAME=VALUE`, `--reset NAME`) writes the file directly without starting a server, and prompts only when stdin is a terminal.
 
 ### Which Access windows the server may close
 
@@ -237,7 +252,7 @@ Run these tests **through this server**, never from the add-in's own window. `mo
 - **Images are returned inline, and written to disk only with `save_image=True`.** The result is a `CallToolResult` (text then image, no output schema); `usage_logging` reads its outcome from the first text block and never logs the content.
 - **A saved screenshot is for the chat.** `save_image=True` writes the PNG to `ACCESS_VCS_SCREENSHOT_DIR` and adds `image.saved_path`, `image.markdown` (a `/C:/...` link with every special character percent-encoded, which Cursor's chat renders), and `image.target` (`application` for a fallback capture, whatever was requested). `screenshot_store.py` owns the folder:
   - Names are `vcs-shot-YYYYMMDD-HHMMSS-<target>-<8 hex>.png`, never a database or object name.
-  - Files are deleted once older than `ACCESS_VCS_SCREENSHOT_RETENTION_DAYS`, after each save and once per server process after the first `load_config()`, so a `.env` setting applies. Only `vcs-shot-` names past the limit are deleted, so concurrent servers and a shared folder are safe. An image in a chat older than the limit shows as broken.
+  - Files are deleted once older than the retention period (the user setting, or `ACCESS_VCS_SCREENSHOT_RETENTION`), after each save and once per server process after the first `load_config()`, so a `.env` setting applies. Only `vcs-shot-` names past the limit are deleted, so concurrent servers and a shared folder are safe. An image in a chat older than the limit shows as broken.
   - `include_image=False, save_image=True` posts pixels the agent never saw; keep `include_image=True` when the agent will describe the image.
   - `ACCESS_VCS_DISABLE_WRITES` does not cover this folder: it guards databases, and the tool stays in `READ_ONLY_TOOLS` because it writes only the server's own files, as the usage log does.
 

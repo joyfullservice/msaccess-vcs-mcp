@@ -43,6 +43,9 @@ EXEMPT_TOOLS = frozenset({
     # answering the dialog or resetting the run is what releases it.
     "vcs_dismiss_dialog",
     "vcs_reset_vba",
+    # Reads and writes only the server's own settings file, and may wait on
+    # the user's answer to a form.
+    "vcs_configure",
 })
 
 

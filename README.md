@@ -194,6 +194,18 @@ When the server is installed once at the user level (in `~/.cursor/mcp.json` rat
 
 The server prints diagnostics to stderr at startup (visible in Cursor's MCP server output pane) showing the resolved project root and which files were loaded -- check there first if a setting isn't taking effect.
 
+### User Settings
+
+A few settings ask for your decision instead of silently taking a default. Today that is screenshot retention: how long a screenshot saved for the chat is kept. Choose `never` (nothing is saved; images appear only in the reply, and any saved earlier are deleted), a number of days (7 and 30 are offered, 30 is the default), or `forever`. Your answers are saved per user in `~/.msaccess-vcs-mcp/settings.json` (or `ACCESS_VCS_SETTINGS_PATH`) and apply to every project. A value set in the MCP `env` section, `.env`, or `.env.local` still wins.
+
+There are three ways to decide:
+
+- **In a terminal:** `msaccess-vcs configure` asks about each setting. `--show` lists each value and where it came from, `--set screenshot_retention=7` (or `=never`, `=forever`, `=default`) saves without prompting, and `--reset screenshot_retention` forgets a decision.
+- **In chat:** ask the agent to call `vcs_configure`. When your client can show MCP forms (Cursor, Claude Code, VS Code), it opens one. Otherwise the agent asks you and passes your answer.
+- **When it matters:** while retention is undecided, each screenshot saved with `save_image=True` reminds the agent to ask you.
+
+Choosing `default` follows the built-in default, including if a later release changes it. Declining or closing the form saves nothing.
+
 ## Available Tools
 
 ### Database-Level Operations
@@ -498,7 +510,7 @@ Remove this session's option overrides and reload the project's options. Runs au
 
 Capture a PNG of the Access window (`target="application"`), the VBA editor (`"vbe"`), the active object (`"active"`), or a named form, report, table, or query (`"object"`, with `object_type` and `object_name`). A JSON block in front of the image lists every dialog Access is showing, with its text, buttons, and a `dialog_id`, plus `vbe_state` (`break`, `running`, or `design`) and whether the server opened that window.
 
-The `application` and `vbe` captures use Windows APIs only, so they work while Access is blocked on a dialog or in break mode. `include_image=False` returns only the metadata, which is the cheap first call when Access seems stuck. `view="design"` opens a form or report in design view without running its events, and `open_if_closed=True` opens a closed object for the capture and closes it without saving. `save_image=True` also writes the PNG to `ACCESS_VCS_SCREENSHOT_DIR` (kept for `ACCESS_VCS_SCREENSHOT_RETENTION_DAYS`, default 30) and returns a Markdown link for the chat.
+The `application` and `vbe` captures use Windows APIs only, so they work while Access is blocked on a dialog or in break mode. `include_image=False` returns only the metadata, which is the cheap first call when Access seems stuck. `view="design"` opens a form or report in design view without running its events, and `open_if_closed=True` opens a closed object for the capture and closes it without saving. `save_image=True` also writes the PNG to `ACCESS_VCS_SCREENSHOT_DIR` and returns a Markdown link for the chat. Saved files are kept for the retention period you choose with `vcs_configure` or `msaccess-vcs configure` (default 30 days; see [User Settings](#user-settings)), and `image.retention` gives the expiry date. If you chose `never`, nothing is saved and the result says so.
 
 The tool never clicks a button or changes window state.
 
@@ -532,10 +544,19 @@ vcs_tips("stuck")
 
 Get version information for MCP server, MSAccess VCS add-in, and Access application.
 
-Returns `mcp_version`, `vcs_version`, `access_version`, `bitness`, `target_database`, `addin_path`, `callback_url`, `async_available`, and any `errors` or `warnings`.
+Returns `mcp_version`, `vcs_version`, `access_version`, `bitness`, `target_database`, `addin_path`, `callback_url`, `async_available`, the user settings (`settings_path`, `settings`, `pending_settings`), and any `errors` or `warnings`.
 
 ```python
 vcs_get_version_info()
+```
+
+#### `vcs_configure(screenshot_retention?)`
+
+Record your choice for the [user settings](#user-settings). With no argument it lists each setting, its value, and its source, and opens a form when the client supports one. With a value it saves that value: `"never"`, `"forever"`, a whole number of days, or `"default"`. The agent passes only a value you chose. Each saved entry records whether it came from a form, the agent, or the CLI.
+
+```python
+vcs_configure()
+vcs_configure(screenshot_retention="never")
 ```
 
 #### `vcs_get_recent_calls(limit=10)`

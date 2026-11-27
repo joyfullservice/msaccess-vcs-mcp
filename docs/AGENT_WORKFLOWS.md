@@ -362,7 +362,7 @@ vcs_capture_screenshot(r"C:\path\to\db.accdb", target="object",
 - With several Access windows open, pass `database_path` or `pid`; `ambiguous_instance` lists the candidates
 - `open_if_closed=True` runs the object's open events; reports open in print preview, tables and queries read-only, and action queries are refused
 - Minimized or hidden windows cannot be captured; the tool never restores or focuses a window, so ask the user to
-- Screenshots can show client data. They are written to disk only with `save_image=True`, to `~/.msaccess-vcs-mcp/screenshots/`, and deleted after 30 days (`ACCESS_VCS_SCREENSHOT_RETENTION_DAYS`); a chat that shows an expired file loses the image. Keep `include_image=True` when you will describe what you post
+- Screenshots can show client data. They are written to disk only with `save_image=True`, to `~/.msaccess-vcs-mcp/screenshots/`, and deleted after the retention period the user chose (30 days by default; `never` saves none); a chat that shows an expired file loses the image. Keep `include_image=True` when you will describe what you post
 
 ### 7. Iterative Development Cycle
 

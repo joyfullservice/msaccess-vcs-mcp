@@ -4,6 +4,9 @@ Cursor's chat UI does not reliably show MCP progress notifications. This
 CLI launches the same MCP server over stdio, calls one tool, and prints
 each ``notifications/progress`` line as it arrives -- the same live
 feedback as running a Python or PowerShell script.
+
+``configure`` is the exception: it reads and writes the user-level settings
+file directly and starts no server.
 """
 
 from __future__ import annotations
@@ -96,6 +99,35 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wait timeout in seconds (default 10 minutes from the add-in)",
+    )
+
+    configure = sub.add_parser(
+        "configure",
+        help="Choose user-level settings such as screenshot retention",
+        description=(
+            "Ask about each setting that needs a decision and save the answers to "
+            "~/.msaccess-vcs-mcp/settings.json. A value set in mcp.json or a .env "
+            "file wins over the saved one."
+        ),
+    )
+    configure.add_argument(
+        "--show", action="store_true", help="Print each setting, its value, and its source"
+    )
+    configure.add_argument(
+        "--set",
+        dest="set_values",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Save a value without prompting, e.g. screenshot_retention=7, =never, =forever, or =default",
+    )
+    configure.add_argument(
+        "--reset",
+        dest="reset_names",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Forget a saved decision so the setting is undecided again",
     )
     return parser
 
@@ -401,9 +433,99 @@ def startup_message(command: str) -> str:
     return f"Starting {command}..."
 
 
+_DECIDED_BY_TEXT = {
+    "form": "in a form",
+    "agent": "through an agent",
+    "cli": "with msaccess-vcs configure",
+}
+
+
+def print_settings(out=None) -> None:
+    from . import user_settings
+
+    out = out if out is not None else sys.stdout
+    print(f"Settings file: {user_settings.settings_path()}", file=out)
+    for item in user_settings.describe_all():
+        if item["source"] == user_settings.SOURCE_ENV:
+            origin = f"set by {item['env_var']} in the environment"
+        elif item["decided"]:
+            origin = "chosen " + _DECIDED_BY_TEXT.get(item["decided_by"], "earlier")
+            if item["source"] == user_settings.SOURCE_DEFAULT:
+                origin += ", follows the default"
+        else:
+            origin = "not chosen yet, using the default"
+        print(f"  {item['name']} = {item['display']}  ({origin})", file=out)
+
+
+def run_configure(args: argparse.Namespace, *, input_fn=input, is_tty=None, out=None) -> int:
+    """``msaccess-vcs configure``. Talks to the settings file, not to a server."""
+    from . import user_settings
+
+    out = out if out is not None else sys.stdout
+    if args.set_values or args.reset_names:
+        try:
+            decisions: dict[str, str] = {}
+            for item in args.set_values:
+                name, sep, value = item.partition("=")
+                if not sep:
+                    raise ValueError(f"--set needs NAME=VALUE, not '{item}'.")
+                user_settings.normalize(user_settings.find_setting(name), value)
+                decisions[name] = value
+            for name in args.reset_names:
+                user_settings.find_setting(name)
+            for name in args.reset_names:
+                user_settings.reset(name)
+            user_settings.save(decisions, "cli")
+        except (KeyError, ValueError) as exc:
+            print(str(exc).strip("'\""), file=sys.stderr)
+            return 2
+        print_settings(out)
+        return 0
+    if args.show:
+        print_settings(out)
+        return 0
+    if not (sys.stdin.isatty() if is_tty is None else is_tty):
+        print(
+            "msaccess-vcs configure asks questions and needs a terminal. "
+            "Use --show to list settings, or --set NAME=VALUE to save one.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        for setting in user_settings.DECISION_SETTINGS:
+            item = user_settings.describe(setting)
+            print(f"\n{setting.title}: {setting.description}", file=out)
+            if item["source"] == user_settings.SOURCE_ENV:
+                print(f"  Set to {item['display']} by {setting.key} in the environment; "
+                      "change it there.", file=out)
+                continue
+            keep = (f"Enter keeps {item['display']}" if item["decided"]
+                    else f"Enter uses the default, {setting.display(setting.default)}")
+            while True:
+                answer = input_fn(f"  {setting.prompt} [{keep}]: ").strip()
+                if not answer:
+                    if item["decided"]:
+                        break
+                    answer = user_settings.DEFAULT_CHOICE
+                try:
+                    user_settings.save({setting.name: answer}, "cli")
+                    break
+                except ValueError as exc:
+                    print(f"  {exc}", file=out)
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.", file=sys.stderr)
+        return 130
+    print(file=out)
+    print_settings(out)
+    return 0
+
+
 def main(argv: list[str] | None = None, *, session_factory=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "configure":
+        return run_configure(args)
     name, arguments = arguments_for(args)
     print(startup_message(args.command), flush=True)
     printer = ProgressPrinter(compact_tests=args.command == "run-tests")

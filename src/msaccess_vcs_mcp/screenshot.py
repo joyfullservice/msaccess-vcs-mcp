@@ -20,6 +20,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -28,6 +29,7 @@ from mcp.types import CallToolResult, TextContent
 
 from . import screen_capture as sc
 from . import screenshot_store
+from . import user_settings
 from .access_com.instance_registry import list_owned, paths_match
 from .access_com.process_qos import list_access_pids_or_none, pid_from_access_app
 
@@ -43,6 +45,18 @@ CAPTURE_STEP_TIMEOUT_SEC = 20.0
 DEFAULT_SETTLE_MS = 150
 MAX_SETTLE_MS = 5000
 VIEWS = ("normal", "design")
+
+RETENTION_UNDECIDED_GUIDANCE = (
+    f"Saved screenshots are kept for the {user_settings.SCREENSHOT_RETENTION.default}-day "
+    "default because the user has not chosen "
+    "a retention period. Ask the user how long to keep them (\"never\", 7 or 30 days, or "
+    "\"forever\"), then call vcs_configure(screenshot_retention=...) with their answer."
+)
+
+SAVE_NEVER_WARNING = (
+    "Nothing was saved: the user chose never to keep screenshots (screenshot_retention is "
+    "\"never\"). Use include_image=True to see the capture instead."
+)
 
 # Access object types (AcObjectType), views, and save options.
 AC_TABLE = 0
@@ -936,6 +950,21 @@ def _add_warning(meta: dict[str, Any], warning: str) -> None:
     meta["warnings"] = [*(meta.get("warnings") or []), warning]
 
 
+def _add_retention(meta: dict[str, Any], image: dict[str, Any]) -> None:
+    """When the saved file expires, and who should decide that if nobody has."""
+    days = screenshot_store.retention_days()
+    decided = user_settings.is_decided(user_settings.SCREENSHOT_RETENTION.key)
+    expires = None if days is None else datetime.now().astimezone() + timedelta(days=days)
+    image["retention"] = {
+        "days": None if days is None else int(days),
+        "forever": days is None,
+        "expires_at": expires.isoformat(timespec="seconds") if expires else None,
+        "decided": decided,
+    }
+    if not decided and not meta.get("agent_guidance"):
+        meta["agent_guidance"] = RETENTION_UNDECIDED_GUIDANCE
+
+
 async def _finish(
     meta: dict[str, Any],
     png: bytes | None,
@@ -950,7 +979,11 @@ async def _finish(
     ``application`` whatever was requested.
     """
     if save_image:
-        if png:
+        if png and not screenshot_store.saving_allowed():
+            _add_warning(meta, SAVE_NEVER_WARNING)
+            folder = screenshot_store.screenshot_dir()
+            await _in_thread(lambda: screenshot_store.prune_expired(folder, 0))
+        elif png:
             try:
                 path = await _in_thread(lambda: screenshot_store.save_and_prune(png, captured))
             except Exception as exc:
@@ -960,6 +993,7 @@ async def _finish(
                 image["saved_path"] = str(path)
                 image["markdown"] = screenshot_store.markdown_link(path, captured)
                 image["target"] = captured
+                _add_retention(meta, image)
         elif meta.get("error_pattern") != "invalid_argument":
             _add_warning(meta, "save_image: no image was captured, so nothing was saved.")
     return build_result(meta, png if include_image else None)

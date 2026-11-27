@@ -21,9 +21,10 @@ from datetime import datetime
 from pathlib import Path, PurePath
 from urllib.parse import quote
 
+from . import user_settings
 from .config import _strip_quotes
 
-DEFAULT_RETENTION_DAYS = 30.0
+DEFAULT_RETENTION_DAYS = float(user_settings.SCREENSHOT_RETENTION.default)
 SECONDS_PER_DAY = 86400
 NAME_PREFIX = "vcs-shot-"
 NAME_PATTERN = re.compile(r"^vcs-shot-\d{8}-\d{6}-[a-z]+-[0-9a-f]{8}\.png$")
@@ -45,15 +46,22 @@ def screenshot_dir() -> Path:
     return Path.home() / ".msaccess-vcs-mcp" / "screenshots"
 
 
-def retention_days() -> float:
-    """Days a saved file is kept; 0 keeps files forever."""
+def retention_days() -> float | None:
+    """Days a saved file is kept: ``None`` keeps files forever, 0 keeps none."""
+    setting = user_settings.SCREENSHOT_RETENTION
     try:
-        value = float(
-            os.environ.get("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
-        )
+        value = setting.parse(user_settings.get_setting(setting.key))
     except ValueError:
         return DEFAULT_RETENTION_DAYS
-    return value if value >= 0 else DEFAULT_RETENTION_DAYS
+    if value == user_settings.FOREVER:
+        return None
+    if value == user_settings.NEVER:
+        return 0.0
+    return float(value)
+
+
+def saving_allowed() -> bool:
+    return retention_days() != 0
 
 
 def save_png(png: bytes, target: str) -> Path:
@@ -77,9 +85,9 @@ def save_png(png: bytes, target: str) -> Path:
     return path
 
 
-def prune_expired(folder: Path, days: float) -> int:
-    """Delete this module's files older than ``days``. Returns how many went."""
-    if days <= 0:
+def prune_expired(folder: Path, days: float | None) -> int:
+    """Delete this module's files older than ``days`` (0: all of them). Returns how many went."""
+    if days is None or days < 0:
         return 0
     cutoff = time.time() - days * SECONDS_PER_DAY
     try:
@@ -91,7 +99,7 @@ def prune_expired(folder: Path, days: float) -> int:
         if not NAME_PATTERN.match(entry.name):
             continue
         try:
-            if entry.is_file() and entry.stat().st_mtime < cutoff:
+            if entry.is_file() and (days == 0 or entry.stat().st_mtime < cutoff):
                 os.unlink(entry.path)
                 removed += 1
         except OSError:
@@ -121,7 +129,7 @@ def start_prune_once() -> threading.Thread | None:
             return None
         _prune_started = True
     folder, days = screenshot_dir(), retention_days()
-    if days <= 0 or not folder.is_dir():
+    if days is None or not folder.is_dir():
         return None
     thread = threading.Thread(
         target=_prune_quietly, args=(folder, days), name="vcs-screenshot-prune", daemon=True
