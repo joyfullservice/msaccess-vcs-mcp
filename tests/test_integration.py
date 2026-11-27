@@ -33,7 +33,7 @@ def test_rebuild_from_source(tmp_path, monkeypatch):
     
     This test requires:
     - Microsoft Access installed
-    - VCS add-in 5.1.1 or later installed
+    - VCS add-in 5.2.0 or later installed
     """
     try:
         import win32com.client

@@ -47,7 +47,7 @@ class FakeAccess:
 
 
 @contextmanager
-def _patch_rebuild(tmp_path, *, version="5.1.1", run=None):
+def _patch_rebuild(tmp_path, *, version="5.2.0", run=None):
     """Patch COM so vcs_rebuild_database runs offline against a fake worker app."""
     app = FakeAccess()
     worker_app = MagicMock()
@@ -127,7 +127,7 @@ def test_without_output_path_sends_one_argument(tmp_path):
 
 def test_output_path_refused_on_older_addin(tmp_path):
     """An extra argument would stop an older add-in on a modal error dialog."""
-    with _patch_rebuild(tmp_path, version="5.1.0") as (app, worker_app, src_path, _):
+    with _patch_rebuild(tmp_path, version="5.1.1") as (app, worker_app, src_path, _):
         result = asyncio.run(
             _unwrap(tools_module.vcs_rebuild_database)(
                 str(src_path), str(tmp_path / "out.accdb")
@@ -137,9 +137,24 @@ def test_output_path_refused_on_older_addin(tmp_path):
     worker_app.Run.assert_not_called()
     assert result["success"] is False
     assert result["error_pattern"] == "addin_version"
-    assert "5.1.1" in result["error"]
+    assert "5.2.0" in result["error"]
     assert app.quit_called
     assert not os.path.exists(os.path.dirname(app.opened[0]))
+
+
+@pytest.mark.parametrize("returned", [None, "", (None,)])
+def test_empty_result_is_a_failed_build(tmp_path, returned):
+    """BuildHeadless always returns JSON; nothing back means a dialog ate the call."""
+    with _patch_rebuild(tmp_path, run=lambda *a: returned) as (_app, _worker, src_path, _):
+        result = asyncio.run(
+            _unwrap(tools_module.vcs_rebuild_database)(
+                str(src_path), str(tmp_path / "out.accdb")
+            )
+        )
+
+    assert result["success"] is False
+    assert result["error_pattern"] == "empty_result"
+    assert result["output_path"] is None
 
 
 def test_failed_build_reports_add_in_error(tmp_path):
@@ -233,8 +248,9 @@ def test_parse_addin_version(text, expected):
 @pytest.mark.parametrize(
     ("version", "output_path", "refused"),
     [
-        ("5.1.1", "C:\\out.accdb", False),
+        ("5.1.1", "C:\\out.accdb", True),
         ("5.2.0", "C:\\out.accdb", False),
+        ("5.2.1", "C:\\out.accdb", False),
         ("5.1.0", "C:\\out.accdb", True),
         ("5.1.0", None, False),
         ("5.0.2", None, True),

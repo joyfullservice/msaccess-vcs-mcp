@@ -29,6 +29,10 @@ BY_ERROR_PATTERN = {
         "Access is not answering automation, usually because a dialog is open or VBA "
         "is in break mode. " + STUCK
     ),
+    "empty_result": (
+        "Nothing was built. The add-in returned no result, which usually means it "
+        "raised an error that Access showed as a dialog. " + STUCK
+    ),
     "server_busy": (
         "Another call holds Access (see busy_with). Retry this call in a few seconds, "
         "and issue Access calls one at a time rather than in parallel."

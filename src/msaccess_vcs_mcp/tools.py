@@ -1317,11 +1317,11 @@ async def _import_objects(
         }
 
 
-# BuildHeadless arrived in 5.1.0 and took an output path from 5.1.1. An extra
+# BuildHeadless arrived in 5.1.0 and took an output path from 5.2.0. An extra
 # argument raises inside the library, which Access shows as a modal dialog rather
 # than returning, so the version has to be checked before the call is made.
 _BUILD_HEADLESS_MIN_VERSION = (5, 1, 0)
-_BUILD_HEADLESS_OUTPUT_MIN_VERSION = (5, 1, 1)
+_BUILD_HEADLESS_OUTPUT_MIN_VERSION = (5, 2, 0)
 _BUILD_HEARTBEAT_SEC = 15.0
 _BUILD_HOST_RELEASE_SEC = 5.0
 
@@ -1617,6 +1617,16 @@ def _build_headless_result(
     raw = run_result.get("result")
     if isinstance(raw, tuple) and raw:
         raw = raw[0]
+    # BuildHeadless always returns JSON, so nothing back means it never finished:
+    # usually an error Access showed as a dialog, which someone then dismissed.
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {
+            "success": False,
+            "error": "BuildHeadless returned no result, so the build did not complete.",
+            "error_pattern": "empty_result",
+            "output_path": None,
+            "source_dir": str(src_path),
+        }
     if isinstance(raw, str) and raw.startswith(_API_REFUSED_PREFIX):
         return {
             "success": False,
@@ -1656,16 +1666,16 @@ async def vcs_rebuild_database(
         # Build to the file the source files name
         vcs_rebuild_database("C:\\\\src\\\\mydb")
         
-        # Build to a different file (add-in 5.1.1 or later)
+        # Build to a different file (add-in 5.2.0 or later)
         vcs_rebuild_database("C:\\\\src\\\\mydb", "C:\\\\output\\\\rebuilt.accdb")
     
     Args:
         source_dir: Directory containing source files
-        output_path: Optional path for the new database file. Omit it to build
-            to the file the source files name, which works with any add-in that
-            has ``BuildHeadless`` (5.1.0). A different path needs add-in 5.1.1
-            or later; against an older add-in the call is refused before the
-            build starts.
+        output_path: Optional full path for the new database file, in a folder
+            that exists. Omit it to build to the file the source files name,
+            which works with any add-in that has ``BuildHeadless`` (5.1.0). A
+            different path needs add-in 5.2.0 or later; against an older add-in
+            the call is refused before the build starts.
         template_path: Accepted for compatibility and ignored; the add-in
             builds into a new blank database.
     
