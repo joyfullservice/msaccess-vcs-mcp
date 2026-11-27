@@ -189,7 +189,7 @@ def validate_components(load_addin: bool = True) -> dict[str, Any]:
             result["errors"].append(
                 f"VCS add-in not found at: {addin.addin_path}. "
                 "Please install the MSAccess VCS add-in or set ACCESS_VCS_ADDIN_PATH. "
-                "Download from: https://github.com/joyfullservice/msaccess-vcs-integration/releases"
+                "Download from: https://github.com/joyfullservice/msaccess-vcs-addin/releases"
             )
         elif load_addin and app and target_db and os.path.exists(target_db):
             # To call add-in functions, we need the target database open

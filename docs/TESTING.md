@@ -47,7 +47,7 @@ Integration tests require:
 ### Prerequisites
 
 1. **Install MSAccess VCS Add-in:**
-   - Download from [releases](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest)
+   - Download from [releases](https://github.com/joyfullservice/msaccess-vcs-addin/releases/latest)
    - Install to default location: `%AppData%\MSAccessVCS\`
 
 2. **Create Test Database:**
@@ -485,4 +485,4 @@ Target coverage goals:
 
 - [pytest Documentation](https://docs.pytest.org/)
 - [pytest-cov Plugin](https://pytest-cov.readthedocs.io/)
-- [MSAccess VCS Add-in Testing](https://github.com/joyfullservice/msaccess-vcs-integration/wiki)
+- [MSAccess VCS Add-in Testing](https://github.com/joyfullservice/msaccess-vcs-addin/wiki)

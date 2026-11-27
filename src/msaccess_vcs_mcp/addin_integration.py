@@ -187,7 +187,7 @@ class VCSAddinIntegration:
             raise RuntimeError(
                 f"VCS add-in not found at: {self.addin_path}\n"
                 f"Please install the MSAccess VCS add-in or set ACCESS_VCS_ADDIN_PATH.\n"
-                f"Download from: https://github.com/joyfullservice/msaccess-vcs-integration/releases"
+                f"Download from: https://github.com/joyfullservice/msaccess-vcs-addin/releases"
             )
         
         # Pre-flight: fast file-existence check.  When db_path is provided,

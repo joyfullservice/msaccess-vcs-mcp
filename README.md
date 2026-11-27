@@ -1,6 +1,6 @@
 # msaccess-vcs-mcp
 
-A lightweight MCP server (Model Context Protocol server) that provides AI agent integration for the [MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-integration). This tool acts as a bridge, allowing AI assistants (e.g., Cursor, Claude Code, and other MCP-compatible clients) to work with Microsoft Access databases through version control operations.
+A lightweight MCP server (Model Context Protocol server) that provides AI agent integration for the [MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-addin). This tool acts as a bridge, allowing AI assistants (e.g., Cursor, Claude Code, and other MCP-compatible clients) to work with Microsoft Access databases through version control operations.
 
 ## Features
 
@@ -47,7 +47,7 @@ Which windows are the server's own is recorded on disk, keyed by process id *and
 - **pywin32**: Python COM interface (installed automatically)
 
 If MCP startup fails with a `CLSIDToClassMap` / `win32com.gen_py` error, the server deletes the stale type-library folder under `%TEMP%\gen_py` and retries once automatically. If it still fails after that, Microsoft Access is probably not installed or not registered for COM automation.
-- **MSAccess VCS Add-in**: Must be installed ([download latest release](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest))
+- **MSAccess VCS Add-in**: Must be installed ([download latest release](https://github.com/joyfullservice/msaccess-vcs-addin/releases/latest))
 
 ## Getting Started
 
@@ -67,7 +67,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 This MCP server requires the MSAccess VCS add-in to be installed.
 
-1. Download the [latest release](https://github.com/joyfullservice/msaccess-vcs-integration/releases/latest) from GitHub
+1. Download the [latest release](https://github.com/joyfullservice/msaccess-vcs-addin/releases/latest) from GitHub
 2. Extract `Version Control.accda` to a trusted location
 3. Open `Version Control.accda` to launch the installer
 4. Click **Install Add-In**
@@ -148,10 +148,12 @@ All configuration is done through environment variables, typically in a `.env` f
 | `ACCESS_VCS_CALLBACK_ENABLED` | Enable HTTP callback server for async progress | `true` | No |
 | `ACCESS_VCS_CALLBACK_HOST` | Host address for callback server | `127.0.0.1` | No |
 | `ACCESS_VCS_VALIDATE_STARTUP` | Validate Access and add-in availability on startup | `false` | No |
-| `ACCESS_VCS_ENABLE_LOGGING` | Enable structured JSONL usage logging | `false` | No |
+| `ACCESS_VCS_ENABLE_LOGGING` | Enable structured JSONL usage logging | `true` | No |
 | `ACCESS_VCS_LOG_DIR` | Custom log directory (overrides auto-detection) | auto | No |
 | `ACCESS_VCS_LOG_MAX_SIZE_MB` | Max log file size before rotation | `10` | No |
 | `ACCESS_VCS_LOG_BACKUP_COUNT` | Number of rotated backup files to keep | `5` | No |
+
+Timeouts, screenshots, and the other settings are listed with their defaults in [.env.example](.env.example).
 
 ### Project-Specific Configuration
 
@@ -278,7 +280,7 @@ Runs the add-in's `BuildHeadless`, so the build never stops on a prompt, and ret
 
 **Args:**
 - `source_dir`: Directory containing source files
-- `output_path`: Optional path for the new database file. Omit it to build to the file the source files name. A different path needs add-in 5.1.1 or later; an older add-in is refused before the build starts.
+- `output_path`: Optional full path for the new database file, in a folder that exists. Omit it to build to the file the source files name. A different path needs add-in 5.2.0 or later; an older add-in is refused before the build starts.
 - `template_path`: Accepted and ignored; the add-in builds into a new blank database
 
 ```python
@@ -444,20 +446,13 @@ result = vcs_check_vba_compiled("C:\\db.accdb")
 
 Compile all VBA modules in an Access database and return success status.
 
-When compilation fails, MCP cannot report the failing module or line. **Stop
-making further code changes.** Ask the user to open the database in Access,
-open the Visual Basic Editor, and choose **Debug → Compile** — Access navigates
-to the first error line. Ask the user to paste the code around that line (a few
-lines above and below). Once you have the snippet, propose a targeted fix; do not
-guess or iterate through speculative edits.
-
-The response includes an `agent_guidance` field when compilation fails.
+Compiles from the VBA editor, the same as **Debug → Compile**. On an error the editor moves to the failing line; the tool reads it, dismisses the "Compile error" dialog, and returns the location in `compile_error`. Fix that line in source, import it, and compile again. The compiler stops at the first error, so others may follow.
 
 **Args:**
 - `database_path`: Path to Access database
 - `suppress_warnings`: If True, suppress message boxes during compilation
 
-**Returns:** `success`
+**Returns:** `success`; on failure, `compile_error` (`message`, `module`, `line`, `code`, and nearby `context`) and `agent_guidance`
 
 ```python
 result = vcs_compile_vba("C:\\db.accdb", suppress_warnings=True)
@@ -493,6 +488,36 @@ vcs_get_option("C:\\db.accdb", "ShowDebug")
 vcs_get_option("C:\\db.accdb", "McpAllowRunVBA")
 ```
 
+#### `vcs_end_session(database_path)`
+
+Remove this session's option overrides and reload the project's options. Runs automatically when the server shuts down.
+
+### Screenshots and Dialogs
+
+#### `vcs_capture_screenshot(database_path?, target, ...)`
+
+Capture a PNG of the Access window (`target="application"`), the VBA editor (`"vbe"`), the active object (`"active"`), or a named form, report, table, or query (`"object"`, with `object_type` and `object_name`). A JSON block in front of the image lists every dialog Access is showing, with its text, buttons, and a `dialog_id`, plus `vbe_state` (`break`, `running`, or `design`) and whether the server opened that window.
+
+The `application` and `vbe` captures use Windows APIs only, so they work while Access is blocked on a dialog or in break mode. `include_image=False` returns only the metadata, which is the cheap first call when Access seems stuck. `view="design"` opens a form or report in design view without running its events, and `open_if_closed=True` opens a closed object for the capture and closes it without saving. `save_image=True` also writes the PNG to `ACCESS_VCS_SCREENSHOT_DIR` (kept for `ACCESS_VCS_SCREENSHOT_RETENTION_DAYS`, default 30) and returns a Markdown link for the chat.
+
+The tool never clicks a button or changes window state.
+
+```python
+vcs_capture_screenshot("C:\\db.accdb", include_image=False)
+vcs_capture_screenshot("C:\\db.accdb", target="object", object_type="form",
+                       object_name="frmMain", view="design")
+```
+
+#### `vcs_dismiss_dialog(dialog_id, button, database_path?, pid?)`
+
+Click one button on a dialog that `vcs_capture_screenshot` reported. Refused with `dialog_changed` if that dialog has been answered or replaced since. Works only on Access windows the server opened; for your own windows it returns `user_owned_instance` and the agent asks you instead.
+
+#### `vcs_reset_vba(database_path?, pid?)`
+
+End VBA break mode in an Access window the server opened, the same as the editor's **Reset** command. Returns where execution stopped (`stopped_at`: module, line, and code). The tool call that was blocked behind the break then returns.
+
+Both tools are refused when `ACCESS_VCS_DISABLE_WRITES` is set.
+
 ### Diagnostics
 
 #### `vcs_tips(topic?)`
@@ -512,6 +537,10 @@ Returns `mcp_version`, `vcs_version`, `access_version`, `bitness`, `target_datab
 ```python
 vcs_get_version_info()
 ```
+
+#### `vcs_get_recent_calls(limit=10)`
+
+Recent tool calls from the usage log. After a client timeout (`-32001`) the server may still have finished the call; this shows what actually ran.
 
 #### `vcs_cancel_operation(operation_id?, database_path?)`
 
@@ -563,7 +592,7 @@ See [docs/VBA_CALLBACK_API.md](docs/VBA_CALLBACK_API.md) for the full callback p
 
 ## Export Format
 
-The VCS add-in exports database objects to a comprehensive folder structure with text-based files. See the [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-integration/blob/main/Version%20Control.accda.src/AGENTS.md) guide for complete format documentation.
+The VCS add-in exports database objects to a comprehensive folder structure with text-based files. See the [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-addin/blob/main/Version%20Control.accda.src/AGENTS.md) guide for complete format documentation.
 
 ### Example Structure
 
@@ -846,4 +875,4 @@ Contributions are welcome! Please open an issue or submit a pull request.
 ## Related Tools
 
 - **[db-inspector-mcp](https://github.com/joyfullservice/db-inspector-mcp)**: Cross-database MCP server for introspection and migration validation
-- **[MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-integration)**: The VBA add-in that powers all export/import operations
+- **[MSAccess VCS Add-in](https://github.com/joyfullservice/msaccess-vcs-addin)**: The VBA add-in that powers all export/import operations

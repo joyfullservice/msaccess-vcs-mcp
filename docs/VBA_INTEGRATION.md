@@ -262,7 +262,7 @@ try:
     addin = VCSAddinIntegration(addin_path)
     if not addin.verify_addin_exists():
         print(f"Add-in not found at: {addin.addin_path}")
-        print("Install from: https://github.com/joyfullservice/msaccess-vcs-integration/releases")
+        print("Install from: https://github.com/joyfullservice/msaccess-vcs-addin/releases")
 except RuntimeError as e:
     print(f"Failed to load add-in: {e}")
 ```
@@ -313,7 +313,7 @@ database.src/
 └── Export.log         # Operation log
 ```
 
-See [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-integration/blob/main/Version%20Control.accda.src/AGENTS.md) for complete format documentation.
+See [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-addin/blob/main/Version%20Control.accda.src/AGENTS.md) for complete format documentation.
 
 ### Encoding
 

@@ -528,15 +528,15 @@ Forms and reports are exported but harder to edit as text:
 
 ## Resources
 
-- [MSAccess VCS Add-in Documentation](https://github.com/joyfullservice/msaccess-vcs-integration/wiki)
+- [MSAccess VCS Add-in Documentation](https://github.com/joyfullservice/msaccess-vcs-addin/wiki)
 - [Export File Format Reference](EXPORT_FORMATS.md)
 - [VBA Integration Guide](VBA_INTEGRATION.md)
-- [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-integration/blob/main/Version%20Control.accda.src/AGENTS.md) - Comprehensive file structure guide
+- [AGENTS.md](https://github.com/joyfullservice/msaccess-vcs-addin/blob/main/Version%20Control.accda.src/AGENTS.md) - Comprehensive file structure guide
 
 ## Support
 
 For issues or questions:
-1. Check the [Wiki](https://github.com/joyfullservice/msaccess-vcs-integration/wiki)
+1. Check the [Wiki](https://github.com/joyfullservice/msaccess-vcs-addin/wiki)
 2. Review Export.log or Build.log
 3. Open an issue on GitHub
 4. Include error messages and context
