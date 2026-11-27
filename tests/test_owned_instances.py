@@ -369,7 +369,7 @@ def test_rebuild_addin_closes_owned_holders(tmp_path, monkeypatch):
         order.append("gate")
         return await fn(*args, **kwargs)
 
-    gate.run_exclusive = _exclusive
+    gate.run_exclusive_all = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
 
     result = asyncio.run(_unwrap(tools_module.vcs_rebuild_addin)(str(source)))

@@ -118,6 +118,24 @@ def test_window_title(processes):
     assert shot.resolve_target_pid(DB, None) == (20, "window_title")
 
 
+def test_window_title_full_path_tells_same_named_copies_apart(processes):
+    processes.tasklist = [10, 20]
+    processes.survey = _survey(
+        p10="Access - example : Database- C:\\wt-a\\example.accdb (Access 2007 - 2016 file format)",
+        p20="Access - example : Database- C:\\wt-b\\example.accdb (Access 2007 - 2016 file format)",
+    )
+    assert shot.resolve_target_pid(r"C:\wt-b\example.accdb", None) == (20, "window_title")
+
+
+def test_window_title_shared_name_without_path_is_ambiguous(processes):
+    processes.tasklist = [10, 20]
+    processes.survey = _survey(p10="Access - example.accdb", p20="Access - example.accdb")
+    with pytest.raises(shot.ScreenshotError) as info:
+        shot.resolve_target_pid(r"C:\wt-a\example.accdb", None)
+    assert info.value.error_pattern == "ambiguous_instance"
+    assert sorted(i["pid"] for i in info.value.extra["instances"]) == [10, 20]
+
+
 def test_database_path_never_falls_back_to_the_only_instance(processes):
     """An unrelated database's window must not pass for the one asked for."""
     processes.tasklist = [10]
@@ -687,7 +705,7 @@ class _Gate:
         self.result = result
         self.calls = []
 
-    def current_in_flight(self):
+    def current_in_flight(self, database=None):
         return self.in_flight
 
     async def run_exclusive(self, tool, database, fn, is_async, *args):

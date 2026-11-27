@@ -210,26 +210,32 @@ Choosing `default` follows the built-in default, including if a later release ch
 
 ### Database-Level Operations
 
-#### `vcs_export_database(database_path, output_dir, object_types, full_export)`
+#### `vcs_export_database(database_path, output_dir=None, object_types, full_export)`
 
 Export Access database objects to source files via the VCS add-in.
 
 With no `object_types`, exports the whole project (async progress). With
 `object_types`, exports only those categories via a scoped sync call. Uses
-fast save by default (only changed objects).
+fast save by default (only changed objects). Files go to the database's own
+export folder (the `ExportFolder` option, by default `<database file name>.src`
+beside it), where the add-in keeps its change index; `export_path` names it.
 
 **Args:**
 - `database_path`: Path to Access database (.accdb, .accda, .mdb)
-- `output_dir`: Directory to export source files to
+- `output_dir`: Optional. Export here instead (add-in 5.2.0 or later): a full
+  export with no change index, leaving the configured folder untouched. In a git
+  working tree it must be inside that tree. A folder holding another project's
+  `vcs-index.idx` is refused. Older add-ins refuse any folder but the configured
+  one (`export_folder_mismatch`)
 - `object_types`: Optional list of categories (defaults to entire project)
 - `full_export`: If True, export all objects in scope (not just changed ones)
 
 **Returns:** `success`, `exported_count`, `export_path`, `objects_by_type`, `log_path`
 
 ```python
-vcs_export_database("C:\\db.accdb", "C:\\src\\mydb")
+vcs_export_database("C:\\db.accdb")
 
-vcs_export_database("C:\\db.accdb", "C:\\src\\mydb", object_types=["modules"])
+vcs_export_database("C:\\db.accdb", object_types=["modules"])
 ```
 
 #### `vcs_list_objects(database_path)`
@@ -327,7 +333,7 @@ Before launch the server closes Access windows **it created** that hold a file t
 Cursor 3.13 often shows only "Running..." for MCP progress. The `msaccess-vcs` command launches this same server over stdio and prints each progress line immediately:
 
 ```text
-msaccess-vcs export C:\db.accdb C:\src --full
+msaccess-vcs export C:\db.accdb --full
 msaccess-vcs merge C:\db.accdb C:\src
 msaccess-vcs rebuild-database C:\src C:\out.accdb
 msaccess-vcs rebuild-addin C:\path\to\msaccess-vcs-addin\Version Control.accda.src
@@ -639,7 +645,7 @@ All files use **UTF-8 with BOM** encoding, which is critical for proper import b
 
 ```python
 # 1. Export database to source
-vcs_export_database("C:\\db.accdb", "C:\\src\\db")
+vcs_export_database("C:\\db.accdb")
 
 # 2. Initialize git (if not already done)
 # cd C:\src\db && git init && git add . && git commit -m "Initial export"
@@ -650,7 +656,7 @@ vcs_export_database("C:\\db.accdb", "C:\\src\\db")
 vcs_diff_database("C:\\db.accdb", "C:\\src\\db")
 
 # 5. Export changes
-vcs_export_database("C:\\db.accdb", "C:\\src\\db")
+vcs_export_database("C:\\db.accdb")
 
 # 6. Commit changes
 # git add . && git commit -m "Updated customer queries"
@@ -684,7 +690,7 @@ db_list_tables(database="legacy")
 db_list_views(database="legacy")
 
 # 2. Export to version control (msaccess-vcs-mcp)
-vcs_export_database("C:\\legacy.accdb", "C:\\src\\legacy-db")
+vcs_export_database("C:\\legacy.accdb")
 
 # 3. Run queries against the database (msaccess-vcs-mcp)
 vcs_execute_sql("C:\\legacy.accdb", "SELECT * FROM Customers WHERE Active = True")

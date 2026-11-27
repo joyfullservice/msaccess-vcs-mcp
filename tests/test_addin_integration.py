@@ -156,7 +156,7 @@ class TestVCSAddinIntegration:
         
         folder = addin._get_export_folder(db_path)
         
-        assert folder == "C:\\Databases\\MyDatabase.src"
+        assert folder == "C:\\Databases\\MyDatabase.accdb.src"
     
     def test_get_export_folder_custom(self):
         """Test custom export folder path."""

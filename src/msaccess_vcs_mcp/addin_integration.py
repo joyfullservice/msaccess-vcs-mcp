@@ -530,15 +530,16 @@ class VCSAddinIntegration:
         if source_folder:
             return source_folder
         
-        # Default: database_name.src folder next to database
+        # Default: the database file name plus .src, next to the database
         db_file = Path(db_path)
-        return str(db_file.parent / f"{db_file.stem}.src")
+        return str(db_file.parent / f"{db_file.name}.src")
     
     def export_source(
         self,
         db_path: str,
         source_folder: Optional[str] = None,
-        full_export: bool = False
+        full_export: bool = False,
+        export_folder: Optional[str] = None,
     ) -> dict[str, Any]:
         """
         Export database to source files using VCS add-in.
@@ -549,8 +550,11 @@ class VCSAddinIntegration:
         
         Args:
             db_path: Path to Access database
-            source_folder: Optional custom export folder (default: db_name.src)
+            source_folder: The folder the export writes to, for the result's
+                paths (default: the database file name plus ``.src``)
             full_export: If True, force full export; if False, use fast save
+            export_folder: Export to this folder instead of the configured one
+                (add-in 5.2.0 or later)
             
         Returns:
             Dictionary with export results:
@@ -564,7 +568,8 @@ class VCSAddinIntegration:
         try:
             # Call VCS API directly (Export or FullExport based on flag)
             command = "FullExport" if full_export else "Export"
-            failure = _export_failure(self._call_addin_function(command))
+            args = (export_folder,) if export_folder else ()
+            failure = _export_failure(self._call_addin_function(command, *args))
             
             # Check for log file to confirm export completed
             log_path = os.path.join(export_path, "Export.log")

@@ -208,6 +208,15 @@ def access_instance_is_live(db_path: str) -> bool:
     return VCSAddinIntegration._find_access_in_rot(db_path) is not None
 
 
+# Gate lanes for different databases connect at the same time. EnsureDispatch
+# returns whichever Access registered itself as active, so a lane that has just
+# started an instance but not yet opened its database could see that empty
+# instance adopted by a second lane. Finding or starting an instance, through
+# opening its database, is therefore one step at a time across lanes.
+_INSTANCE_CREATION_LOCK = threading.Lock()
+INSTANCE_CREATION_TIMEOUT_SEC = 60.0
+
+
 DEFAULT_CLOSE_TIMEOUT_SEC = 10.0
 
 
@@ -262,8 +271,21 @@ def _quit_with_timeout(app, timeout_sec: float) -> bool:
     This runs against an instance that has usually just failed a health
     probe, so the COM call may never return. A blocking call here would
     hang the Access gate thread and take the whole server down with it.
+
+    ``app`` belongs to the calling thread's apartment; used directly from
+    the worker every call fails with RPC_E_WRONG_THREAD, so the interface
+    is marshalled across. An object that cannot be marshalled (a test
+    double) is handed over as is.
     """
     done: dict[str, bool] = {}
+    stream = None
+    if COM_AVAILABLE:
+        try:
+            stream = pythoncom.CoMarshalInterThreadInterfaceInStream(
+                pythoncom.IID_IDispatch, app._oleobj_
+            )
+        except Exception:
+            stream = None
 
     def worker() -> None:
         if COM_AVAILABLE:
@@ -272,11 +294,17 @@ def _quit_with_timeout(app, timeout_sec: float) -> bool:
             except Exception:
                 pass
         try:
+            target = app
+            if stream is not None:
+                target = win32com.client.Dispatch(
+                    pythoncom.CoGetInterfaceAndReleaseStream(stream, pythoncom.IID_IDispatch)
+                )
             try:
-                app.CloseCurrentDatabase()
+                target.CloseCurrentDatabase()
             except Exception:
                 pass
-            app.Quit()
+            target.Quit()
+            target = None
             done["ok"] = True
         except Exception:
             done["ok"] = False
@@ -461,23 +489,32 @@ class AccessConnection:
         """
         if self._app is None:
             created_now = False
+            if not _INSTANCE_CREATION_LOCK.acquire(timeout=INSTANCE_CREATION_TIMEOUT_SEC):
+                raise RuntimeError(
+                    "Another Access instance is still starting, and its database may "
+                    "be showing a dialog. Retry shortly, or check it with "
+                    "vcs_capture_screenshot."
+                )
             try:
-                # A moniker bind *launches* Access when nothing has the file
-                # open, so whether an instance was already running decides
-                # whether the process below is ours. The ROT lookup only
-                # inspects the table -- it cannot start anything itself.
-                was_running = access_instance_is_live(self._db_path)
-                self._app = win32com.client.GetObject(self._db_path)
-                self._db_opened_via_getobject = True
-                created_now = not was_running
-            except Exception:
-                self._app, created_now = self._create_or_reuse_instance()
-                self._db_opened_via_getobject = False
-                # Never displace a user's database: only open on instances
-                # we just created (empty or isolated).
-                self._owns_app = created_now
-                self._open_as_current_database(self._app)
-            self._resolve_ownership(created_now)
+                try:
+                    # A moniker bind *launches* Access when nothing has the file
+                    # open, so whether an instance was already running decides
+                    # whether the process below is ours. The ROT lookup only
+                    # inspects the table -- it cannot start anything itself.
+                    was_running = access_instance_is_live(self._db_path)
+                    self._app = win32com.client.GetObject(self._db_path)
+                    self._db_opened_via_getobject = True
+                    created_now = not was_running
+                except Exception:
+                    self._app, created_now = self._create_or_reuse_instance()
+                    self._db_opened_via_getobject = False
+                    # Never displace a user's database: only open on instances
+                    # we just created (empty or isolated).
+                    self._owns_app = created_now
+                    self._open_as_current_database(self._app)
+                self._resolve_ownership(created_now)
+            finally:
+                _INSTANCE_CREATION_LOCK.release()
             if self._owns_app:
                 from .process_qos import prefer_full_power_app
 

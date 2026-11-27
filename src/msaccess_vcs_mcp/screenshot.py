@@ -207,10 +207,37 @@ def _instances(live: set[int], survey: dict[int, dict[str, Any]], owned: set[int
     ]
 
 
-def _title_matches(title: str, database_path: str) -> bool:
-    lowered = title.lower()
-    path = os.path.normcase(os.path.abspath(database_path)).lower()
-    return path in lowered or Path(database_path).name.lower() in lowered
+def _title_has_path(title: str, database_path: str) -> bool:
+    return os.path.normcase(os.path.abspath(database_path)).lower() in title.lower()
+
+
+def _title_has_name(title: str, database_path: str) -> bool:
+    return Path(database_path).name.lower() in title.lower()
+
+
+def _title_match(live: set[int], survey: dict, database_path: str, instances: list) -> int | None:
+    """The one window whose title names ``database_path``, or None.
+
+    Access's default title carries the full path, which tells worktrees of
+    one project apart. A database that sets its own application title shows
+    no path, and every copy shows the same name, so a name shared by several
+    windows is ambiguous rather than a match.
+    """
+    titles = {p: survey.get(p, {}).get("title", "") for p in live}
+    by_path = {p for p, t in titles.items() if _title_has_path(t, database_path)}
+    if len(by_path) == 1:
+        return next(iter(by_path))
+    by_name = by_path or {p for p, t in titles.items() if _title_has_name(t, database_path)}
+    if len(by_name) == 1:
+        return next(iter(by_name))
+    if len(by_name) > 1:
+        raise ScreenshotError(
+            "ambiguous_instance",
+            f"Several Access windows show a database named {Path(database_path).name} "
+            "(copies of one project in different folders usually do). Pass pid.",
+            instances=[i for i in instances if i["pid"] in by_name],
+        )
+    return None
 
 
 def resolve_target_pid(database_path: str | None, pid: int | None) -> tuple[int, str]:
@@ -259,11 +286,9 @@ def resolve_target_pid(database_path: str | None, pid: int | None) -> tuple[int,
                 "Several server-created Access processes have this database open. Pass pid.",
                 instances=[i for i in instances if i["pid"] in owned_matches],
             )
-        title_matches = {
-            p for p in live if _title_matches(survey.get(p, {}).get("title", ""), database_path)
-        }
-        if len(title_matches) == 1:
-            return next(iter(title_matches)), "window_title"
+        titled = _title_match(live, survey, database_path, instances)
+        if titled is not None:
+            return titled, "window_title"
         raise ScreenshotError(
             "database_not_open",
             "No running Access process has this database open. Pass pid to capture one "
@@ -1066,12 +1091,13 @@ async def capture_screenshot(
         return await finish({"success": True, **base, **outcome.meta}, outcome.png)
 
     gate = get_gate()
-    in_flight = gate.current_in_flight()
+    in_flight = gate.current_in_flight(str(database_path))
     if in_flight is not None:
         busy = ScreenshotError(
             "server_busy",
-            f"Another Access operation is in progress ({in_flight.tool}). Object captures "
-            "wait for the gate; the application capture below shows what Access is doing.",
+            f"Another Access operation is in progress on this database ({in_flight.tool}). "
+            "Object captures wait for it; the application capture below shows what Access "
+            "is doing.",
             busy_with={"tool": in_flight.tool, "database": in_flight.database},
         )
         return await _with_application_capture(

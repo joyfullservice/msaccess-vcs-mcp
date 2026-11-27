@@ -177,7 +177,7 @@ The add-in writes detailed logs for each operation:
 Beginning Export of Source Files
 MyDatabase.accdb
 VCS Version 4.1.0
-Export Folder: C:\mydb.src
+Export Folder: C:\mydb.accdb.src
 Using Fast Save
 
 Exporting Queries... (15)
@@ -190,7 +190,7 @@ Export Complete! (3.2 seconds)
 **Build.log:**
 ```
 Beginning Build from Source
-Source Folder: C:\mydb.src
+Source Folder: C:\mydb.accdb.src
 Building Database...
 Importing Queries... (15)
 Importing Modules... (8)
@@ -431,7 +431,7 @@ import filecmp
 from msaccess_vcs_mcp.tools import vcs_export_database
 
 # Export with Python tool
-vcs_export_database("test.accdb", "python_export")
+vcs_export_database("test.accdb")
 
 # Export with VBA tool (manual or automated)
 # compare_exports.vbs

@@ -41,6 +41,12 @@ pytest -m "not integration"
 pytest --cov=msaccess_vcs_mcp --cov-report=html
 ```
 
+The multi-instance concurrency suite is skipped by every run above, including `-m integration`. It builds three throwaway databases and drives them in parallel, so up to three Access windows appear for a few minutes. Run it after changing the Access gate (`access_gate.py`), instance creation or ownership (`access_com/connection.py`, `access_com/instance_registry.py`), the VBA worker, dialog control, screenshots, the callback server, the `vcs_tool` wrapper, or the add-in's headless export, merge, build, or test paths:
+
+```powershell
+pytest tests/test_concurrency_integration.py --run-concurrency -v
+```
+
 ## Repository Structure
 
 ```
@@ -64,6 +70,7 @@ msaccess-vcs-mcp/
 │   ├── guidance.py             # agent_guidance added to failed results
 │   ├── access_state.py         # Dialogs and break mode attached to timeouts
 │   ├── shared_open.py          # Import warnings when another session holds the database
+│   ├── worktree.py             # Git worktree detection; shared-data and worktree-install warnings
 │   ├── user_settings.py        # User-level setting decisions and their resolver
 │   ├── settings_form.py        # vcs_configure: form or relayed values
 │   ├── tips.py                 # vcs_tips topic loader
@@ -99,7 +106,7 @@ Claude Code cuts server instructions, and any tool description it loads upfront,
 
 - **Instructions** (`SERVER_INSTRUCTIONS` in `tools.py`, 3,500 characters or fewer): the rules every call needs, with the installed-add-in rule, no parallel calls, the stuck-Access call, and the `vcs_tips` triggers in the first 2,000 characters. No tool reference; every client lists the tools.
 - **Results**: a failed result carries `agent_guidance`, one sentence naming the next call. A successful result carries it only when it needs a decision from the user (see [User settings](#user-settings)). `guidance.py` fills it in the `vcs_tool` wrapper from `error_pattern` (and a refused `vcs_rebuild_addin`) when the code that built the result did not. Never put guidance or dialog text in `error`; the usage log records that field. On `timeout` and `access_unresponsive`, `access_state.py` also attaches `access_state` (`pid`, `owned_by_server`, `vbe_state`, `modal_blocked`, `dialogs` with text capped at 500 characters) and guidance naming the `dialog_id` or `vcs_reset_vba()`. It reads windows only, through the screenshot resolver, under a 5-second deadline, and only when the call named a database (for `vcs_rebuild_addin`, the development copy beside `source_dir`), because the resolver's single-instance shortcut could describe an unrelated window.
-- **`vcs_tips(topic)`**: depth for one situation, from the files in [src/msaccess_vcs_mcp/tips/](src/msaccess_vcs_mcp/tips/): [addin-development](src/msaccess_vcs_mcp/tips/addin-development.md), [stuck](src/msaccess_vcs_mcp/tips/stuck.md), [compile](src/msaccess_vcs_mcp/tips/compile.md), [logs](src/msaccess_vcs_mcp/tips/logs.md), [run-vba](src/msaccess_vcs_mcp/tips/run-vba.md). Gate-exempt, and the only tool registered with `meta={"anthropic/alwaysLoad": True}`.
+- **`vcs_tips(topic)`**: depth for one situation, from the files in [src/msaccess_vcs_mcp/tips/](src/msaccess_vcs_mcp/tips/): [addin-development](src/msaccess_vcs_mcp/tips/addin-development.md), [stuck](src/msaccess_vcs_mcp/tips/stuck.md), [compile](src/msaccess_vcs_mcp/tips/compile.md), [logs](src/msaccess_vcs_mcp/tips/logs.md), [run-vba](src/msaccess_vcs_mcp/tips/run-vba.md), [worktrees](src/msaccess_vcs_mcp/tips/worktrees.md). Gate-exempt, and the only tool registered with `meta={"anthropic/alwaysLoad": True}`.
 
 `tests/test_agent_text.py` enforces the limits and checks that every `vcs_*` name and `vcs_tips` topic mentioned anywhere exists. When a behaviour described in a topic changes, update the topic in the same change.
 
@@ -140,7 +147,8 @@ Key variables:
 - `ACCESS_VCS_SCREENSHOT_RETENTION` — how long a saved screenshot is kept: `never` (saves none), `forever`, or whole days (default 30). No number stands for a policy. Usually a user setting (below); a value here wins over it.
 - `ACCESS_VCS_SETTINGS_PATH` — where user setting decisions are saved (default `~/.msaccess-vcs-mcp/settings.json`)
 - `ACCESS_VCS_COMPILE_TIMEOUT_SEC` — how long `vcs_compile_vba` waits for the editor's compile to succeed or show its error before returning `compile_timeout` (default 120s)
-- `ACCESS_VCS_BUSY_WAIT_SEC` — how long a second tool call waits for the Access gate before returning `server_busy` (default 15s)
+- `ACCESS_VCS_BUSY_WAIT_SEC` — how long a tool call waits for its database's lane (or for an exclusive hold) before returning `server_busy` (default 15s)
+- `ACCESS_VCS_MAX_PARALLEL` — how many databases, each in its own Access instance, run calls at the same time (default 3)
 - `ACCESS_VCS_RECOVERY_PROBE_TIMEOUT_SEC` — timeout for automatic Access/add-in recovery probes after a VBA timeout or COM disconnect (default 10s)
 - `ACCESS_VCS_LEAVE_ACCESS_OPEN` — when `true` (the default), a COM-created Access instance is not Quit on disconnect so a later attach can reuse the boosted process. The user closes the window. Set `false` to restore quit-per-call. The server still closes instances it created when a rebuild must replace a file they hold, or when recycling a stuck owned instance after a failed recovery probe. User-owned Access is never closed.
 - `ACCESS_VCS_CLOSE_TIMEOUT_SEC` — how long a graceful close of a server-created instance may take before it is force-terminated (default 10s)
@@ -171,7 +179,11 @@ The rules, all enforced in `access_com/instance_registry.py` and `access_com/con
 - **A live process keeps its claim.** A record is dropped only once the process is confirmed gone. Forgetting a live owned instance would make it permanently uncloseable.
 - **A loaded add-in counts as holding a file.** Every tool call loads the add-in as a library, which locks it no matter which database that instance has open. `load_addin` records this, and a rebuild closes those instances too — matching only on the open database would make rebuilds refuse almost every time.
 
-One MCP server process is shared across all Cursor windows. Sync tools run in a single COM apartment thread with one Access operation at a time. A long call in one window causes others to get `error_pattern: server_busy` with `busy_with` naming the in-flight tool — retry rather than waiting for a client `-32001` timeout. After any client timeout, call `vcs_get_recent_calls()` to see what actually executed.
+One MCP server process is shared across all Cursor windows and every agent in them. `access_gate.py` gives each database a lane: a one-at-a-time slot and its own COM apartment thread. Calls on the same database run in order; calls on different databases, each in its own Access instance, run in parallel, up to `ACCESS_VCS_MAX_PARALLEL`. A call that names no database, and `vcs_rebuild_addin`'s launch (`run_exclusive_all`), wait for every lane and hold new lane calls off, because the rebuild closes server-created instances that loaded the add-in. A tool whose database is not `database_path` names it in `_lane_target` (today `vcs_rebuild_database`). A call that waits too long gets `error_pattern: server_busy` with `busy_with` naming the in-flight tool and a `reason` (`same_database`, `exclusive`, `exclusive_waiting`, `max_parallel`) — retry rather than waiting for a client `-32001` timeout. After any client timeout, call `vcs_get_recent_calls()` to see what actually executed.
+
+- **Starting an instance is one step at a time across lanes.** `EnsureDispatch` returns whichever Access registered itself as active, so `_get_access_app` holds `_INSTANCE_CREATION_LOCK` from finding or starting an instance through opening its database. Without it, two lanes adopt the same fresh instance.
+- **Module state must be per database or locked.** Recovery state (`com_recovery.py`), screenshot cleanup, and the ownership registry are; anything new that a tool keeps between calls has to be too.
+- **The add-in keeps per-operation registry data per Access window** (`Timer <hwnd>`, `State <hwnd>`); a shared section let parallel instances pick up each other's operations.
 
 `vcs_run_vba` executes Access COM work in a daemon worker thread with a hard timeout. If a snippet hangs because Access is in break mode, blocked on a modal dialog, or otherwise unresponsive, the MCP server abandons that thread and returns a recoverable timeout. It does **not** kill `MSACCESS.EXE` or close user-owned Access windows; after Access becomes responsive, the next call runs an automatic probe and resumes normal operation.
 

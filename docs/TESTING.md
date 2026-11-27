@@ -85,7 +85,7 @@ pytest -m "not integration"
    ```
    C:\test\
    ├── TestDB.accdb          # Test database
-   ├── TestDB.src\           # Source files (will be created)
+   ├── TestDB.accdb.src\           # Source files (will be created)
    └── TestDB_built.accdb    # Rebuilt database (will be created)
    ```
 
@@ -101,10 +101,7 @@ This test verifies the complete workflow from export through modify to merge bui
 from msaccess_vcs_mcp.tools import vcs_export_database
 
 # Export test database
-result = vcs_export_database(
-    "C:\\test\\TestDB.accdb",
-    "C:\\test\\TestDB.src"
-)
+result = vcs_export_database("C:\\test\\TestDB.accdb")
 
 print(f"Success: {result['success']}")
 print(f"Exported: {result['exported_count']} objects")
@@ -112,8 +109,8 @@ print(f"Path: {result['export_path']}")
 
 # Verify source files were created
 import os
-assert os.path.exists("C:\\test\\TestDB.src")
-assert os.path.exists("C:\\test\\TestDB.src\\vcs-options.json")
+assert os.path.exists("C:\\test\\TestDB.accdb.src")
+assert os.path.exists("C:\\test\\TestDB.accdb.src\\vcs-options.json")
 print("✓ Export successful")
 ```
 
@@ -121,7 +118,7 @@ print("✓ Export successful")
 
 ```python
 # Read a query
-query_path = "C:\\test\\TestDB.src\\queries\\TestQuery.sql"
+query_path = "C:\\test\\TestDB.accdb.src\\queries\\TestQuery.sql"
 with open(query_path, 'r', encoding='utf-8-sig') as f:
     original_sql = f.read()
 
@@ -146,7 +143,7 @@ from msaccess_vcs_mcp.tools import vcs_import_objects
 # Merge source changes into database
 result = vcs_import_objects(
     "C:\\test\\TestDB.accdb",
-    "C:\\test\\TestDB.src"
+    "C:\\test\\TestDB.accdb.src"
 )
 
 print(f"Success: {result['success']}")
@@ -186,7 +183,7 @@ from msaccess_vcs_mcp.tools import vcs_rebuild_database
 
 # Build fresh database from source
 result = vcs_rebuild_database(
-    "C:\\test\\TestDB.src",
+    "C:\\test\\TestDB.accdb.src",
     "C:\\test\\TestDB_built.accdb"
 )
 
@@ -202,24 +199,14 @@ print("✓ Build from source successful")
 #### Step 6: Compare Databases
 
 ```python
-# Export both databases and compare
-vcs_export_database(
-    "C:\\test\\TestDB.accdb",
-    "C:\\test\\TestDB_original.src"
-)
-
-vcs_export_database(
-    "C:\\test\\TestDB_built.accdb",
-    "C:\\test\\TestDB_rebuilt.src"
-)
+# Export both databases (each to its own <file name>.src folder) and compare
+original = vcs_export_database("C:\\test\\TestDB.accdb")
+rebuilt = vcs_export_database("C:\\test\\TestDB_built.accdb")
 
 # Compare source files
 import filecmp
 
-dcmp = filecmp.dircmp(
-    "C:\\test\\TestDB_original.src",
-    "C:\\test\\TestDB_rebuilt.src"
-)
+dcmp = filecmp.dircmp(original["export_path"], rebuilt["export_path"])
 
 print(f"Identical files: {len(dcmp.same_files)}")
 print(f"Different files: {len(dcmp.diff_files)}")
@@ -273,14 +260,10 @@ class TestEndToEndWorkflow:
     
     def test_complete_workflow(self, test_db_path, tmp_path):
         """Test complete export -> modify -> merge -> build workflow."""
-        src_path = tmp_path / "TestDB.src"
-        
-        # 1. Export
-        result = vcs_export_database(
-            test_db_path,
-            str(src_path)
-        )
+        # 1. Export (to the database's own TestDB.accdb.src folder)
+        result = vcs_export_database(test_db_path)
         assert result["success"]
+        src_path = Path(result["export_path"])
         assert src_path.exists()
         
         # 2. Modify source
@@ -333,7 +316,7 @@ addin_path = config["ACCESS_VCS_ADDIN_PATH"]
 
 # Should fail gracefully
 try:
-    result = vcs_export_database("test.accdb", "test.src")
+    result = vcs_export_database("test.accdb")
     assert not result["success"]
     assert "not found" in result.get("error", "").lower()
 except RuntimeError as e:
@@ -349,7 +332,7 @@ import os
 # Without write permission
 os.environ["ACCESS_VCS_ALLOW_WRITES"] = "false"
 
-result = vcs_import_objects("test.accdb", "test.src")
+result = vcs_import_objects("test.accdb", "test.accdb.src")
 assert not result["success"]
 assert "permission" in result["error"].lower()
 ```
@@ -357,10 +340,7 @@ assert "permission" in result["error"].lower()
 ### Test Invalid Database Path
 
 ```python
-result = vcs_export_database(
-    "C:\\NonExistent\\Database.accdb",
-    "C:\\test\\output"
-)
+result = vcs_export_database("C:\\NonExistent\\Database.accdb")
 assert not result["success"]
 ```
 
@@ -368,11 +348,11 @@ assert not result["success"]
 
 ```python
 # First export
-result1 = vcs_export_database("test.accdb", "test.src")
+result1 = vcs_export_database("test.accdb")
 count1 = result1["exported_count"]
 
 # Second export without changes (should be fast)
-result2 = vcs_export_database("test.accdb", "test.src")
+result2 = vcs_export_database("test.accdb")
 count2 = result2["exported_count"]
 
 # Fast save should export fewer objects
@@ -387,7 +367,7 @@ assert count2 <= count1
 import time
 
 start = time.time()
-result = vcs_export_database("large.accdb", "large.src")
+result = vcs_export_database("large.accdb")
 duration = time.time() - start
 
 print(f"Exported {result['exported_count']} objects in {duration:.2f}s")
@@ -398,7 +378,7 @@ print(f"Average: {duration/result['exported_count']:.3f}s per object")
 
 ```python
 start = time.time()
-result = vcs_import_objects("large.accdb", "large.src")
+result = vcs_import_objects("large.accdb", "large.accdb.src")
 duration = time.time() - start
 
 print(f"Merge build completed in {duration:.2f}s")
@@ -429,13 +409,13 @@ pythoncom.CoInitialize()
 After operations, check log files:
 ```python
 # Export log
-log_path = "C:\\test\\TestDB.src\\Export.log"
+log_path = "C:\\test\\TestDB.accdb.src\\Export.log"
 if os.path.exists(log_path):
     with open(log_path, 'r') as f:
         print(f.read())
 
 # Build log  
-log_path = "C:\\test\\TestDB.src\\Build.log"
+log_path = "C:\\test\\TestDB.accdb.src\\Build.log"
 if os.path.exists(log_path):
     with open(log_path, 'r') as f:
         print(f.read())

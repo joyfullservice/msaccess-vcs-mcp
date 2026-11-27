@@ -349,6 +349,9 @@ def _patch_merge_tool(tmp_path, async_result, completion=None):
     db_path.touch()
     src_path = tmp_path / "src"
     src_path.mkdir(exist_ok=True)
+    mock_addin.call_sync.side_effect = (
+        lambda command, *_a: str(src_path) + "\\" if command == "GetExportFolder" else None
+    )
 
     op_manager = MagicMock()
     op_manager.register_operation.return_value = ("op-1", MagicMock())

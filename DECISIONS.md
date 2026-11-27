@@ -74,6 +74,191 @@ contradictory guidance.
 
 ---
 
+## 2026-11-27 — Refuse work in a copy whose export folder is outside it; output_dir exports elsewhere
+
+**Trigger**: In a git worktree or clone of a project whose `ExportFolder` option is
+absolute, a build wrote the database into the original's folder and later exports
+and imports used the original's source. An agent working "in its own worktree"
+was silently editing the main checkout. Separately, agents wanted `output_dir` to
+work, which the add-in can now do for one operation (add-in decision log, "An
+export to another folder lasts one operation and writes no index").
+
+**Options explored**:
+- Warn only, as the add-in does: rejected for agents. A warning in a long result is
+  easy to miss, and the damage (another checkout's source changed) is done by then.
+- Redirect to the worktree's own folder: deferred. The user could not see where the
+  path came from.
+- **Chosen**: `worktree.export_folder_refusal` refuses export, import, and build
+  with `error_pattern: export_folder_outside_working_tree` when the database or
+  `source_dir` is in a git working tree and the effective export folder is not.
+  `build_source_refusal` reads the source folder's own `vcs-options.json`, so a
+  build is checked before Access opens anything. `vcs_set_option` refuses
+  `ExportFolder`.
+- `output_dir`: `_resolve_export_target` passes it to the add-in as the folder
+  argument when `GetVCSVersion` is 5.2.0 or later; otherwise it keeps the old
+  `export_folder_mismatch` refusal, because an extra argument to an older add-in
+  shows a modal dialog. A capability probe was rejected: 5.2 is unreleased, so the
+  version is exact. A folder holding a `vcs-index.idx` is refused
+  (`export_folder_has_index`), and `_claim_export_folder` returns `server_busy`
+  (`reason: same_folder`) when two lanes export into one folder.
+
+**Decision**: In a git working tree, an explicit `output_dir` must be inside that
+tree too, so an agent in a worktree cannot write into another checkout by passing a
+path. Outside any working tree it may go anywhere. `_lane_target` and the
+instance-closing step of `vcs_rebuild_database` use `_build_target`, which mirrors
+where the add-in will actually write.
+
+**What this rules out**: Agent work in a copy of a project with an absolute
+`ExportFolder` until the user changes the option. Incremental exports to
+`output_dir`.
+
+**Relevant files**: `src/msaccess_vcs_mcp/worktree.py`, `tools.py`
+(`_resolve_export_target`, `_build_target`, `_claim_export_folder`,
+`_source_folder_mismatch`), `addin_integration.py` (`export_source`),
+`tests/test_worktree_refusal.py`, `tests/test_export_output_dir.py`,
+`tests/test_export_folder_rule.py`.
+
+---
+
+## 2026-11-27 — vcs_export_database reports the real export folder and refuses another
+
+> **⚠ Partially superseded** (2026-11-27): with add-in 5.2.0 or later, `output_dir`
+> exports to that folder for one operation instead of being refused;
+> `export_folder_mismatch` remains for older add-ins. See "Refuse work in a copy
+> whose export folder is outside it; output_dir exports elsewhere" above.
+
+**Trigger**: The concurrency suite exported three databases with `output_dir`
+set to a temp folder. All three returned success and an `export_path` naming that
+folder, but the files were in each database's own `<file>.accdb.src` folder and
+`output_dir` was left empty. The tool had always validated and created
+`output_dir`, then echoed it back, while the add-in exported wherever the
+database's `ExportFolder` option points. The documented examples passed folders
+such as `mydb.src` that the add-in never uses.
+
+**Options explored**:
+- Honor `output_dir` by setting `ExportFolder` for the call: rejected. The change
+  index that pairs source files with the database lives in the export folder, a
+  session override is stored inside that same folder, and later merges would read
+  from wherever the override pointed.
+- An add-in API that exports a whole project to an alternate folder: deferred. The
+  index has an `AlternateExport` section only for single objects, and a
+  whole-project alternate export would need its own index handling.
+- **Chosen**: ask the add-in (`GetExportFolder`, present since 5.0) where the
+  database exports, return that as `export_path`, make `output_dir` optional,
+  and refuse a different one with `error_pattern: export_folder_mismatch` before
+  anything is exported. Nothing is created up front any more.
+
+**Decision**: An agent always learns where the files really are. A caller that
+passed the right folder sees no change; one that passed a different folder now
+gets a refusal naming the right one instead of a success pointing at an empty
+folder. The sync fallback's default folder was also wrong (`<stem>.src`) and now
+matches the add-in (`<file name>.src`).
+
+**What this rules out**: `vcs_export_database` cannot produce a second copy of a
+project's source elsewhere. Export the copy of the database that lives there
+instead, or add an alternate-export API to the add-in first.
+
+**Relevant files**: `src/msaccess_vcs_mcp/tools.py` (`vcs_export_database`,
+`_database_export_folder`, `_export_folder_mismatch`), `addin_integration.py`
+(`_get_export_folder`), `cli.py`, `tests/test_scoped_sync.py`.
+
+---
+
+## 2026-11-27 — One gate lane per database, so parallel agents drive their own Access instances
+
+**Trigger**: A coordinating agent (an arena run, for example) starts several local
+subagents, each in its own worktree with its own database, to build, test, and
+screenshot in parallel. They all share this server. Each database already got its
+own Access instance, but the gate had one slot and one COM apartment thread for
+the whole server, so builds and test runs ran one after another, and one instance
+stopped on a dialog or in break mode blocked every agent until its call timed out.
+
+**Options explored**:
+- One server process per agent: rejected. Cursor runs one server per configuration
+  for all windows and subagents, and separate processes would each keep their own
+  view of which windows the server created.
+- Keep one gate and document the queue: rejected as the end state. It makes
+  "independent" agents share one agent's worth of Access time, and a stuck window
+  stalls everyone.
+- **Chosen**: a lane per normalized database path (the key `com_recovery` already
+  uses): a slot plus a single-thread executor that calls `CoInitialize`. A
+  readers-writer state sits above the lanes. A call that names no database, and
+  `vcs_rebuild_addin`'s launch (`run_exclusive_all`), wait for every lane and hold
+  new lane calls off while they wait, because the rebuild closes server-created
+  instances that loaded the add-in. `ACCESS_VCS_MAX_PARALLEL` (default 3) caps the
+  active lanes, since each instance costs memory and a core. Idle lane threads are
+  shut down after ten minutes.
+- Let different databases share a thread and interleave: rejected. A blocking COM
+  call on one instance would still stall the others.
+
+**Decision**: `server_busy` now means this database, an exclusive hold, or the cap
+is busy, and `busy_with.reason` says which. `vcs_rebuild_database` names its target
+through `_lane_target` (`output_path`, or the file beside `source_dir`), since it
+has no `database_path`. Finding or starting an Access instance is serialized
+(`_INSTANCE_CREATION_LOCK` in `connection.py`): `EnsureDispatch` returns whichever
+instance registered itself as active, and without the lock two lanes adopted the
+same fresh instance (`tests/test_instance_creation_lock.py` fails without it).
+Waiting happens on a worker thread; a caller cancelled while waiting releases
+whatever the wait acquired. `vcs_cancel_operation`, `vcs_dismiss_dialog`, and
+`vcs_reset_vba` already refused ambiguous calls when several instances run. The
+add-in's shared `Timer` and `State` registry sections became per window (see the
+add-in's decision log).
+
+**What this rules out**: Calls on the same database stay serial; Access runs one
+thread per process. The server cannot tell agents apart, so keeping one agent out
+of another's database and dialogs is guidance (`vcs_tips("worktrees")`), not
+enforcement. Code that keeps state between tool calls must key it by database or
+lock it. Changes here need the opt-in suite:
+`pytest tests/test_concurrency_integration.py --run-concurrency -v`.
+
+**Relevant files**: `src/msaccess_vcs_mcp/access_gate.py`,
+`access_com/connection.py`, `tools.py` (`vcs_tool` wrapper, `_lane_target`,
+`vcs_rebuild_addin`), `screenshot.py`, `tests/test_access_gate.py`,
+`tests/test_instance_creation_lock.py`, `tests/test_concurrency_integration.py`,
+`.cursor/rules/concurrency-tests.mdc`.
+
+---
+
+## 2026-11-27 — Worktree builds warn about what they share; add-in installs from a worktree say so
+
+**Trigger**: Agents build and test from git worktrees, including several at once.
+A worktree gets none of the gitignored files, and shares everything outside its
+folder with the main checkout. `vcs_rebuild_addin` from a worktree replaced the
+add-in for every Access session on the machine without saying so, and a build
+whose back end was not copied looked successful apart from a log line.
+
+**Options explored**:
+- Refuse `vcs_rebuild_addin` from a worktree: rejected. Testing a branch through
+  the installed path is sometimes the point, and a refusal would push agents to
+  copy files into the main checkout instead.
+- Refuse `vcs_rebuild_database` when a source is shared: rejected. Reading a
+  shared back end is usually what the agent wants; only writing is the risk, and
+  the server cannot see what code will write.
+- **Chosen**: detect the worktree from the `.git` file at its root (a `gitdir:`
+  line naming an admin folder that holds `commondir`; a submodule's admin folder
+  has none). A completed `vcs_rebuild_addin` adds `installed_from_worktree`,
+  `main_checkout`, a warning, and `agent_guidance` naming the rebuild that puts
+  `dev` back. `vcs_rebuild_database` passes the add-in's `dataSources` through as
+  `data_sources` and warns about missing sources, and about shared ones
+  (`outside`, `network`, `server`) when the database is in a worktree.
+- Shell out to `git rev-parse --git-common-dir`: rejected. It needs git on PATH
+  and a subprocess per call for what two small files answer.
+
+**Decision**: Warnings only, with a `vcs_tips("worktrees")` topic that explains
+setup, sharing, and parallel agents. An older add-in that sends no `dataSources`
+gets no new fields.
+
+**What this rules out**: The server does not judge whether writing to a source is
+safe; that stays with the agent and the user. If git changes the worktree layout
+(`commondir`), `find_worktree` returns None and the warnings silently stop, so
+`tests/test_worktree.py` pins the layout.
+
+**Relevant files**: `src/msaccess_vcs_mcp/worktree.py`, `tools.py`
+(`_build_headless_result`, `vcs_rebuild_addin`), `tips/worktrees.md`,
+`tests/test_worktree.py`.
+
+---
+
 ## 2026-11-27 — User setting decisions: asked deliberately, saved per user
 
 **Trigger**: Screenshot retention silently defaulted to 30 days. A user who

@@ -83,5 +83,6 @@ Thumbs.db
 # Usage logs (development mode)
 logs/
 
-# Cursor project-specific
-.cursor/
+# Cursor project-specific, except shared agent rules
+.cursor/*
+!.cursor/rules/

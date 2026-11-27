@@ -321,7 +321,7 @@ def test_rebuild_addin_returns_refusal_without_watch(tmp_path, monkeypatch):
     async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
         return await fn(*args, **kwargs)
 
-    gate.run_exclusive = _exclusive
+    gate.run_exclusive_all = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
 
     watched = AsyncMock(side_effect=AssertionError("should not watch after refusal"))
@@ -365,7 +365,7 @@ def test_rebuild_addin_emits_starting_access_before_launch(tmp_path, monkeypatch
     async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
         return await fn(*args, **kwargs)
 
-    gate.run_exclusive = _exclusive
+    gate.run_exclusive_all = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
 
     async def _watch(*_a, **_k):
@@ -417,7 +417,7 @@ def test_rebuild_addin_watches_after_launch(tmp_path, monkeypatch):
         released["held"] = False
         return result
 
-    gate.run_exclusive = _exclusive
+    gate.run_exclusive_all = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
 
     async def _watch(*_a, **_k):
@@ -489,7 +489,7 @@ def test_rebuild_addin_passes_callback_identity_to_worker(tmp_path, monkeypatch)
     async def _exclusive(_tool, _db, fn, _is_async, /, *args, **kwargs):
         return await fn(*args, **kwargs)
 
-    gate.run_exclusive = _exclusive
+    gate.run_exclusive_all = _exclusive
     monkeypatch.setattr(tools_module, "get_access_gate", lambda: gate)
 
     async def _watch(*_args, **_kwargs):

@@ -21,6 +21,7 @@ PACKAGE = Path(tools.__file__).parent
 GUIDANCE_SOURCES = [
     "tools.py", "guidance.py", "access_state.py", "vba_worker_manager.py",
     "screenshot.py", "vba_control.py", "compile_check.py", "settings_form.py",
+    "worktree.py",
 ]
 # vcs_-prefixed words that are not tool names: tools run-vba.md says do not
 # exist, and a result field.

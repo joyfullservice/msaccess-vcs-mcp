@@ -74,6 +74,9 @@ def _patch_import_tool(tmp_path, *, scoped_result=None, async_result=None):
     db_path.touch()
     src_path = tmp_path / "src"
     src_path.mkdir(exist_ok=True)
+    mock_addin.call_sync.side_effect = (
+        lambda command, *_a: str(src_path) + "\\" if command == "GetExportFolder" else None
+    )
 
     op_manager = MagicMock()
     op_manager.register_operation.return_value = ("op-1", MagicMock())
@@ -117,6 +120,9 @@ def _patch_export_tool(tmp_path, *, scoped_result=None, async_result=None):
     db_path.touch()
     export_path = tmp_path / "src"
     export_path.mkdir(exist_ok=True)
+    mock_addin.call_sync.side_effect = (
+        lambda command, *_a: str(export_path) + "\\" if command == "GetExportFolder" else None
+    )
 
     op_manager = MagicMock()
     op_manager.register_operation.return_value = ("op-1", MagicMock())
@@ -131,7 +137,6 @@ def _patch_export_tool(tmp_path, *, scoped_result=None, async_result=None):
         patch("msaccess_vcs_mcp.tools.AccessConnection", return_value=mock_conn),
         patch("msaccess_vcs_mcp.tools.VCSAddinIntegration", return_value=mock_addin),
         patch("msaccess_vcs_mcp.tools.validate_database_path", return_value=db_path),
-        patch("msaccess_vcs_mcp.tools.validate_export_directory", return_value=export_path),
         patch("msaccess_vcs_mcp.tools._check_database_busy", return_value=None),
         patch("msaccess_vcs_mcp.tools.get_callback_url", return_value="http://localhost:1/cb"),
         patch("msaccess_vcs_mcp.tools._get_operation_manager", return_value=op_manager),
@@ -208,7 +213,7 @@ class TestImportObjectsScoped:
                 _unwrap_sync(vcs_import_objects)(db_path, str(src_path))
             )
 
-        mock_addin.call_sync.assert_not_called()
+        assert [c.args[0] for c in mock_addin.call_sync.call_args_list] == ["GetExportFolder"]
         mock_addin.call_async.assert_called_once()
         assert mock_addin.call_async.call_args[0][1] == "MergeBuild"
         assert result["success"] is True
@@ -308,9 +313,77 @@ class TestExportDatabaseScoped:
                 _unwrap_sync(vcs_export_database)(db_path, str(export_path))
             )
 
-        mock_addin.call_sync.assert_not_called()
+        assert [c.args[0] for c in mock_addin.call_sync.call_args_list] == ["GetExportFolder"]
         mock_addin.call_async.assert_called_once()
         assert mock_addin.call_async.call_args[0][1] == "Export"
+        assert result["success"] is True
+
+    def test_other_output_dir_on_old_addin_is_refused_before_export(self, tmp_path):
+        from msaccess_vcs_mcp.tools import vcs_export_database
+
+        elsewhere = tmp_path / "elsewhere"
+        with _patch_export_tool(tmp_path) as (db_path, export_path, mock_addin, _):
+            result = asyncio.run(_unwrap_sync(vcs_export_database)(db_path, str(elsewhere)))
+
+        assert result["success"] is False
+        assert result["error_pattern"] == "export_folder_mismatch"
+        assert result["export_path"] == str(export_path)
+        mock_addin.call_async.assert_not_called()
+        assert not elsewhere.exists()
+
+    def test_other_output_dir_is_passed_to_the_addin(self, tmp_path):
+        from msaccess_vcs_mcp.tools import vcs_export_database
+
+        elsewhere = tmp_path / "elsewhere"
+        with _patch_export_tool(
+            tmp_path, async_result={"async": True, "timeout_ms": 1000}
+        ) as (db_path, export_path, mock_addin, _):
+            mock_addin.call_sync.side_effect = lambda command, *_a: {
+                "GetExportFolder": str(export_path) + "\\", "GetVCSVersion": "5.2.0",
+            }.get(command)
+            result = asyncio.run(_unwrap_sync(vcs_export_database)(db_path, str(elsewhere)))
+
+        assert result["success"] is True
+        assert result["export_path"] == str(elsewhere)
+        assert mock_addin.call_async.call_args[0][1:] == ("Export", str(elsewhere))
+
+    def test_scoped_export_to_output_dir_adds_the_folder_argument(self, tmp_path):
+        from msaccess_vcs_mcp.tools import vcs_export_database
+
+        elsewhere = tmp_path / "elsewhere"
+        payload = json.dumps({"success": True, "logPath": "C:\\x.log"})
+        with _patch_export_tool(tmp_path, scoped_result=payload) as (
+            db_path, export_path, mock_addin, _,
+        ):
+            mock_addin.call_sync.side_effect = lambda command, *_a: {
+                "GetExportFolder": str(export_path) + "\\", "GetVCSVersion": "5.2.0",
+            }.get(command)
+            asyncio.run(_unwrap_sync(vcs_export_database)(
+                db_path, str(elsewhere), object_types=["queries"]))
+
+        assert _scoped_call(mock_addin) == ("ExportByType", ["queries", False, str(elsewhere)])
+
+    def test_output_dir_is_optional_and_reports_the_real_folder(self, tmp_path):
+        from msaccess_vcs_mcp.tools import vcs_export_database
+
+        with _patch_export_tool(
+            tmp_path, async_result={"async": True, "timeout_ms": 1000}
+        ) as (db_path, export_path, mock_addin, _):
+            result = asyncio.run(_unwrap_sync(vcs_export_database)(db_path))
+
+        assert result["success"] is True
+        assert result["export_path"] == str(export_path)
+
+    def test_matching_output_dir_with_trailing_slash_is_accepted(self, tmp_path):
+        from msaccess_vcs_mcp.tools import vcs_export_database
+
+        with _patch_export_tool(
+            tmp_path, async_result={"async": True, "timeout_ms": 1000}
+        ) as (db_path, export_path, mock_addin, _):
+            result = asyncio.run(
+                _unwrap_sync(vcs_export_database)(db_path, str(export_path).upper() + "\\")
+            )
+
         assert result["success"] is True
 
     def test_modules_only_no_longer_uses_export_vba(self, tmp_path):

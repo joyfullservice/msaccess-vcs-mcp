@@ -1,0 +1,24 @@
+---
+description: Run the opt-in multi-instance Access suite after changing code that schedules or drives Access instances
+globs: src/msaccess_vcs_mcp/access_gate.py,src/msaccess_vcs_mcp/access_com/connection.py,src/msaccess_vcs_mcp/access_com/instance_registry.py,src/msaccess_vcs_mcp/vba_worker_manager.py,src/msaccess_vcs_mcp/vba_control.py,src/msaccess_vcs_mcp/screenshot.py,src/msaccess_vcs_mcp/callback_server.py,src/msaccess_vcs_mcp/operation_manager.py,src/msaccess_vcs_mcp/tools.py
+alwaysApply: false
+---
+
+# Concurrency suite
+
+The file you are editing takes part in running several Access instances at once:
+one gate lane per database, instance creation and ownership, dialogs, screenshots,
+or callbacks. Unit tests mock COM, so they cannot catch two real instances
+colliding.
+
+Before you finish, run the opt-in suite in the venv. It is skipped by every other
+run, including `-m integration`:
+
+```powershell
+pytest tests/test_concurrency_integration.py --run-concurrency -v
+```
+
+It opens up to three visible Access windows for a few minutes and closes only the
+ones it started. In `tools.py`, it is needed only for changes to the `vcs_tool`
+wrapper, `_lane_target`, or a tool's gate or instance handling, not for wording or
+result fields. If you cannot run it, say so in your summary.

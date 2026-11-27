@@ -20,11 +20,11 @@ Call it again with the image when the layout matters. `target="vbe"` shows the V
 
 ## Result patterns
 
-- `error_pattern: server_busy`: another call (perhaps from another Cursor window) holds Access; `busy_with` names it. Retry shortly. Access calls run one at a time, so do not issue them in parallel.
+- `error_pattern: server_busy`: another call (perhaps from another Cursor window or agent) holds this database, or an exclusive operation such as `vcs_rebuild_addin` holds every database; `busy_with` names it. Retry shortly. Calls on one database run one at a time, so do not issue them in parallel.
 - `error_pattern: timeout`: the server stopped waiting. It does not close Access. Look first (above); the next call probes Access and resumes once it responds. `access_state`, when present, already carries what the screenshot would show.
 - `error_pattern: access_unresponsive`: Access is not answering automation, usually because of a dialog or break mode. Same steps.
 - Client error `-32001`: the client gave up and no result reached you. Call `vcs_get_recent_calls()` to see what actually ran, and whether it finished, before retrying.
 
 ## Stopping a long operation
 
-`vcs_cancel_operation()` stops a running export, import, rebuild, or test run; with no arguments it targets the only one running. A canceled run returns `cancelled: true` and `error_pattern: operation_cancelled`.
+`vcs_cancel_operation()` stops a running export, import, rebuild, or test run; with no arguments it targets the only one running, and when several are running it lists them so you can pass the `operation_id` or `database_path` of yours. A canceled run returns `cancelled: true` and `error_pattern: operation_cancelled`.

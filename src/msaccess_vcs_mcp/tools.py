@@ -58,6 +58,17 @@ from .access_state import attach_access_state
 from .guidance import with_guidance
 from .shared_open import shared_open_warnings, with_warnings_first
 from .tips import get_tips
+from .worktree import (
+    build_source_refusal,
+    configured_export_folder,
+    data_source_warnings,
+    expand_export_folder,
+    export_folder_refusal,
+    is_relative_export_folder,
+    same_folder,
+    source_db_file_name,
+    worktree_install_fields,
+)
 from .config import (
     get_config,
     get_callback_url,
@@ -72,7 +83,6 @@ from .addin_integration import (
 )
 from .security import (
     validate_database_path,
-    validate_export_directory,
     validate_source_directory,
     check_write_permission,
 )
@@ -397,9 +407,10 @@ SERVER_INSTRUCTIONS = (
     "- The installed add-in (under %APPDATA%\\MSAccessVCS) is never a target. Tools "
     "refuse it as database_path, output_path, or template_path. Work on the "
     "development copy in the add-in's repository and rebuild from there.\n"
-    "- Access runs one call at a time. Issue Access tool calls one after another, "
-    "not in parallel; a call that waits too long (15 seconds by default) for another "
-    "returns error_pattern \"server_busy\" and can be retried.\n"
+    "- Calls on the same database run one at a time: issue them one after another, "
+    "not in parallel. Different databases run in parallel. A call that waits too "
+    "long (15 seconds by default) returns error_pattern \"server_busy\" and can be "
+    "retried.\n"
     "- If Access seems stuck or a call timed out, call "
     "vcs_capture_screenshot(database_path, include_image=False). It lists every "
     "dialog Access is showing and whether VBA is in break mode, and it works while "
@@ -411,7 +422,9 @@ SERVER_INSTRUCTIONS = (
     "- Access stuck, a dialog, break mode, or a timeout: vcs_tips(\"stuck\").\n"
     "- VBA compile errors: vcs_tips(\"compile\").\n"
     "- Writing code for vcs_run_vba: vcs_tips(\"run-vba\").\n"
-    "- Finding operation logs: vcs_tips(\"logs\").\n\n"
+    "- Finding operation logs: vcs_tips(\"logs\").\n"
+    "- Working in a git worktree or second copy, or alongside other agents: "
+    "vcs_tips(\"worktrees\").\n\n"
     "Workflow: vcs_export_database writes source files; edit them; "
     "vcs_import_objects merges changes back; vcs_diff_database compares the database "
     "with source; vcs_rebuild_database builds a fresh database from source. Most "
@@ -599,6 +612,55 @@ def _default_annotations(name: str) -> ToolAnnotations | None:
     return None
 
 
+def _build_target(source_dir: str | Path, output_path: str | None = None) -> str | None:
+    """The database file a build of ``source_dir`` writes, as the add-in decides it.
+
+    Mirrors ``GetOriginalDbFullPathFromSource`` during a build: the file named in
+    vbe-project.json, at the ``VCS Build Path`` in proj-properties.json when the
+    folder is the one its absolute ExportFolder names, otherwise beside the source
+    folder (a copy of the source, or a blank or relative ExportFolder).
+    """
+    if output_path:
+        return str(output_path)
+    if not source_dir:
+        return None
+    src = Path(str(source_dir).rstrip("\\/"))
+    name = source_db_file_name(src)
+    if not name:
+        text = str(src)
+        return text[:-4] if text.lower().endswith(".src") else text
+
+    configured = configured_export_folder(src)
+    is_copy = not is_relative_export_folder(configured) and not same_folder(
+        expand_export_folder(configured, name), src
+    )
+    if not is_copy:
+        try:
+            props = json.loads((src / "proj-properties.json").read_text(encoding="utf-8-sig"))
+            build_path = str((props.get("Items") or {}).get("VCS Build Path") or "")
+        except (OSError, ValueError, AttributeError):
+            build_path = ""
+        if build_path:
+            return str(Path(build_path) / name)
+    return str(src.parent / name)
+
+
+def _lane_target(name: str, func: Any, args: tuple, kwargs: dict) -> str | None:
+    """The database a gated call without ``database_path`` works on, if any.
+
+    A call with no database takes the whole gate, so a tool that names its
+    database another way says so here. ``vcs_rebuild_database`` builds
+    ``output_path`` or, when that is omitted, the file ``_build_target`` names.
+    """
+    if name != "vcs_rebuild_database":
+        return None
+    try:
+        bound = inspect.signature(func).bind_partial(*args, **kwargs).arguments
+    except TypeError:
+        return None
+    return _build_target(bound.get("source_dir"), bound.get("output_path"))
+
+
 def vcs_tool(
     name: str,
     *,
@@ -627,9 +689,10 @@ def vcs_tool(
 
     The wrapper is *always* an async coroutine. FastMCP detects this via
     ``inspect.iscoroutinefunction`` and awaits it correctly. Sync tool
-    bodies run in a single COM apartment thread via :mod:`access_gate` so
-    they no longer block the asyncio event loop. One Access operation runs
-    at a time across all Cursor windows sharing this server process.
+    bodies run on their database's COM apartment thread via
+    :mod:`access_gate` so they do not block the asyncio event loop. Calls on
+    one database run one at a time; calls on different databases run in
+    parallel, across all Cursor windows sharing this server process.
     """
     def decorator(func):
         logged = with_logging(name)(func)
@@ -671,6 +734,8 @@ def vcs_tool(
                 param_names = list(sig.parameters.keys())
                 if param_names and param_names[0] == "database_path":
                     database = args[0]
+            if database is None:
+                database = _lane_target(name, func, args, kwargs)
 
             gate = get_access_gate()
             return await gate.run_exclusive(
@@ -688,10 +753,156 @@ def vcs_tool(
     return decorator
 
 
+def _default_export_folder(db_path: Path) -> Path:
+    """The add-in's default export folder: the database file name plus ``.src``."""
+    return db_path.parent / f"{db_path.name}.src"
+
+
+def _database_export_folder(addin: VCSAddinIntegration, db_path: Path) -> Path:
+    """Where the add-in will export this database, asked of the add-in itself."""
+    try:
+        folder = addin.call_sync("GetExportFolder")
+    except Exception:
+        folder = None
+    if isinstance(folder, tuple) and folder:
+        folder = folder[0]
+    if isinstance(folder, str) and folder.strip():
+        return Path(folder.strip().rstrip("\\/"))
+    return _default_export_folder(db_path)
+
+
+def _source_folder_mismatch(source_dir: Path, merge_folder: Path) -> dict[str, Any] | None:
+    if same_folder(source_dir, merge_folder):
+        return None
+    return {
+        "success": False,
+        "error": (
+            f"This database merges from {merge_folder}, not {source_dir}. The add-in "
+            "reads a merge from the database's own export folder (the ExportFolder "
+            "option), so merging would not use the files in source_dir. Nothing was "
+            "imported."
+        ),
+        "error_pattern": "source_folder_mismatch",
+        "export_path": str(merge_folder),
+        "agent_guidance": (
+            "Pass the database's export folder (export_path) as source_dir, or build "
+            "a database from source_dir with vcs_rebuild_database and work in that one."
+        ),
+    }
+
+
+def _export_folder_mismatch(output_dir: str, export_path: Path) -> dict[str, Any]:
+    return {
+        "success": False,
+        "error": (
+            f"This database exports to {export_path}, not {output_dir}. The installed "
+            "add-in exports only to the database's own export folder (the ExportFolder "
+            "option); exporting to another folder needs add-in 5.2.0 or later. "
+            "Nothing was exported."
+        ),
+        "error_pattern": "export_folder_mismatch",
+        "export_path": str(export_path),
+        "agent_guidance": (
+            "Call the export again without output_dir, and read the files from "
+            "export_path, or ask the user to update the add-in."
+        ),
+    }
+
+
+# An add-in that lacks an argument raises a modal dialog in Access when it is
+# passed one, so the export folder argument is only sent at or above this version.
+_EXPORT_FOLDER_MIN_VERSION = (5, 2, 0)
+
+
+def _addin_supports_export_folder(addin: VCSAddinIntegration) -> bool:
+    try:
+        version = addin.call_sync("GetVCSVersion")
+    except Exception:
+        return False
+    if isinstance(version, tuple) and version:
+        version = version[0]
+    parsed = _parse_addin_version(version)
+    return parsed is not None and parsed >= _EXPORT_FOLDER_MIN_VERSION
+
+
+def _resolve_export_target(
+    addin: VCSAddinIntegration, db_path: Path, output_dir: str | None
+) -> tuple[Path, str | None, dict[str, Any] | None]:
+    """Where an export of ``db_path`` writes: ``(export_path, override, refusal)``.
+
+    ``override`` is set when ``output_dir`` names a folder other than the
+    database's configured export folder and the add-in can export there.
+    """
+    configured = _database_export_folder(addin, db_path)
+    if not output_dir or same_folder(output_dir, configured):
+        return configured, None, export_folder_refusal(db_path, configured)
+
+    target = Path(os.path.abspath(output_dir))
+    if not _addin_supports_export_folder(addin):
+        return configured, None, _export_folder_mismatch(output_dir, configured)
+    refusal = export_folder_refusal(db_path, target)
+    if refusal:
+        return target, None, refusal
+    if (target / "vcs-index.idx").is_file():
+        return target, None, {
+            "success": False,
+            "error": (
+                f"{target} holds a vcs-index.idx, so it is some database's export "
+                "folder. An export to another folder runs without an index and would "
+                "overwrite that database's source files unchecked. Nothing was exported."
+            ),
+            "error_pattern": "export_folder_has_index",
+            "export_path": str(target),
+            "agent_guidance": (
+                "Pass an empty folder, or one an earlier export with output_dir created, "
+                "as output_dir."
+            ),
+        }
+    return target, str(target), None
+
+
+_ACTIVE_EXPORT_FOLDERS: dict[str, str] = {}
+_ACTIVE_EXPORT_FOLDERS_LOCK = threading.Lock()
+
+
+def _export_folder_key(folder: str | Path) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(str(folder).rstrip("\\/"))))
+
+
+def _claim_export_folder(folder: str | Path, tool: str) -> dict[str, Any] | None:
+    """Reserve ``folder`` for one export, or return a busy result naming the holder.
+
+    Lanes keep calls on one database in order, but two databases can export
+    into the same folder (an output_dir, or a shared absolute export folder).
+    """
+    key = _export_folder_key(folder)
+    with _ACTIVE_EXPORT_FOLDERS_LOCK:
+        holder = _ACTIVE_EXPORT_FOLDERS.get(key)
+        if holder is None:
+            _ACTIVE_EXPORT_FOLDERS[key] = tool
+            return None
+    return {
+        "success": False,
+        "error": (
+            f"Another call ({holder}) is exporting to {folder}. Two exports cannot write "
+            "one folder at the same time."
+        ),
+        "error_pattern": "server_busy",
+        "recoverable": True,
+        "busy_with": {"tool": holder, "database": None, "reason": "same_folder"},
+        "retry_after_seconds": 5,
+    }
+
+
+def _release_export_folder(folder: str | Path) -> None:
+    with _ACTIVE_EXPORT_FOLDERS_LOCK:
+        _ACTIVE_EXPORT_FOLDERS.pop(_export_folder_key(folder), None)
+
+
 @vcs_tool("vcs_export_database")
 async def vcs_export_database(
     database_path: str,
-    output_dir: str,
+    output_dir: str | None = None,
     object_types: list[str] | None = None,
     full_export: bool = False,
     ctx: Context = None
@@ -701,6 +912,18 @@ async def vcs_export_database(
     
     Exports tables, queries, forms, reports, macros, and modules to
     text-based files suitable for version control.
+
+    Without ``output_dir``, files go to the database's own export folder (the
+    ExportFolder option, by default ``<database file name>.src`` beside it),
+    where the add-in keeps the change index paired with that database.
+    With ``output_dir`` naming another folder (add-in 5.2.0 or later), the
+    export writes there without an index, exports everything in scope, and
+    changes nothing in the configured folder or the database's settings; a
+    folder that already holds a ``vcs-index.idx`` is refused
+    (``export_folder_has_index``), and an older add-in refuses with
+    ``export_folder_mismatch``. ``export_path`` in the result always names
+    where the files went. In a git worktree or clone, the folder must be
+    inside that working tree (``export_folder_outside_working_tree``).
     
     With no ``object_types``, runs a full-project export (``Export`` /
     ``FullExport``) with progress callbacks. With ``object_types``, runs a
@@ -711,21 +934,18 @@ async def vcs_export_database(
     
     Examples:
         # Export entire database (quick/fast save - only changed objects)
-        vcs_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
+        vcs_export_database("C:\\\\src\\\\mydb.accdb")
         
         # Full export (all objects, regardless of changes)
-        vcs_export_database("C:\\\\db.accdb", "C:\\\\src\\\\mydb", full_export=True)
+        vcs_export_database("C:\\\\src\\\\mydb.accdb", full_export=True)
         
         # Export only queries and modules
-        vcs_export_database(
-            "C:\\\\db.accdb", 
-            "C:\\\\src\\\\mydb",
-            object_types=["queries", "modules"]
-        )
+        vcs_export_database("C:\\\\src\\\\mydb.accdb", object_types=["queries", "modules"])
     
     Args:
         database_path: Path to Access database (.accdb, .accda, .mdb)
-        output_dir: Directory to export source files to
+        output_dir: Optional folder to export to instead of the database's
+            export folder (see above)
         object_types: Optional categories to export (e.g. ``["queries"]``,
             ``["modules", "forms"]``). If None, exports the entire project.
         full_export: If True, export all objects in scope; if False (default),
@@ -746,7 +966,7 @@ async def vcs_export_database(
     try:
         # Validate paths
         db_path = validate_database_path(database_path)
-        export_path = validate_export_directory(output_dir, allow_create=True)
+        export_path = _default_export_folder(db_path)
         
         # Get configuration
         config = get_config()
@@ -782,112 +1002,19 @@ async def vcs_export_database(
                     "agent_guidance": _ADDIN_NOT_RESPONSIVE_GUIDANCE,
                 }
 
-            # Category-scoped export: sync ExportByType (no progress callbacks).
-            if object_types:
-                types_arg = _scoped_types_arg(object_types)
-                if not types_arg:
-                    return {
-                        "success": False,
-                        "error": "object_types was empty after stripping blanks",
-                        "exported_count": 0,
-                        "export_path": str(export_path),
-                        "objects_by_type": {},
-                    }
-                result = await _run_scoped_api(
-                    app, addin, "ExportByType", [types_arg, full_export],
-                    str(db_path), ctx, "Exporting",
+            export_path, override, refusal = _resolve_export_target(addin, db_path, output_dir)
+            if refusal:
+                return refusal
+            busy = _claim_export_folder(export_path, "vcs_export_database")
+            if busy:
+                return busy
+            try:
+                return await _export_database_in(
+                    app, addin, db_path, export_path, override, object_types,
+                    full_export, command, callback_url, op_manager, ctx,
                 )
-                result.setdefault("export_path", str(export_path))
-                return _attach_log_context(result, export_path, "Export")
-            
-            # Check if async export is available
-            if callback_url and op_manager:
-                # Ensure operation manager uses the correct event loop (FastMCP's loop)
-                op_manager.set_event_loop(asyncio.get_running_loop())
-                # Use async path with progress callbacks
-                operation_id, queue = op_manager.register_operation(
-                    database_path=str(db_path),
-                    command=command
-                )
-                callback_info = op_manager.create_callback_info(
-                    operation_id, callback_url, "cursor"
-                )
-                
-                try:
-                    # Call async API (Export/FullExport use VCS options)
-                    async_result = addin.call_async(callback_info, command)
-                    
-                    completion = None
-                    if async_result.get("sync"):
-                        # VBA returned sync result
-                        op_manager.unregister_operation(operation_id)
-                    elif async_result.get("async"):
-                        # Wait for completion with progress reporting
-                        timeout_ms = async_result.get("timeout_ms", 300000)
-                        completion = await op_manager.wait_for_completion(
-                            operation_id,
-                            ctx=ctx,  # Pass context for progress reporting
-                            timeout_seconds=timeout_ms / 1000
-                        )
-                        
-                        if not completion.get("success"):
-                            return _attach_log_context(_mark_cancelled({
-                                "success": False,
-                                "error": completion.get("error", "Export failed"),
-                                "error_pattern": completion.get("error_pattern"),
-                                "operation_id": completion.get("operation_id") or operation_id,
-                                "exported_count": 0,
-                                "export_path": str(export_path),
-                                "objects_by_type": {},
-                            }, completion), export_path, "Export", completion)
-                    else:
-                        # Neither marker: the add-in never started the operation,
-                        # so run it synchronously rather than reporting success
-                        # for work that never happened.
-                        op_manager.unregister_operation(operation_id)
-                        result = addin.export_source(str(db_path), str(export_path))
-                        
-                        if not result["success"]:
-                            return _attach_log_context({
-                                "success": False,
-                                "error": result["message"],
-                                "exported_count": 0,
-                                "export_path": str(export_path),
-                                "objects_by_type": {},
-                            }, export_path, "Export")
-                except Exception as e:
-                    # Async call failed - fall back to sync
-                    completion = None
-                    op_manager.unregister_operation(operation_id)
-                    result = addin.export_source(str(db_path), str(export_path))
-                    
-                    if not result["success"]:
-                        return _attach_log_context({
-                            "success": False,
-                            "error": result["message"],
-                            "exported_count": 0,
-                            "export_path": str(export_path),
-                            "objects_by_type": {},
-                        }, export_path, "Export")
-            else:
-                # Use sync path (no callbacks available)
-                completion = None
-                result = addin.export_source(str(db_path), str(export_path))
-                
-                if not result["success"]:
-                    return _attach_log_context({
-                        "success": False,
-                        "error": result["message"],
-                        "exported_count": 0,
-                        "export_path": str(export_path),
-                        "objects_by_type": {},
-                    }, export_path, "Export")
-            
-            return _attach_log_context({
-                "success": True,
-                "export_path": str(export_path),
-                "messages": (completion or {}).get("log_messages"),
-            }, export_path, "Export", completion)
+            finally:
+                _release_export_folder(export_path)
     
     except Exception as e:
         return {
@@ -897,6 +1024,129 @@ async def vcs_export_database(
             "export_path": None,
             "objects_by_type": {},
         }
+
+
+async def _export_database_in(
+    app: Any,
+    addin: VCSAddinIntegration,
+    db_path: Path,
+    export_path: Path,
+    override: str | None,
+    object_types: list[str] | None,
+    full_export: bool,
+    command: str,
+    callback_url: str | None,
+    op_manager: Any,
+    ctx: Context | None,
+) -> dict[str, Any]:
+    """Run a database export into ``export_path``; ``override`` when it is not the
+    database's configured export folder."""
+    # Category-scoped export: sync ExportByType (no progress callbacks).
+    if object_types:
+        types_arg = _scoped_types_arg(object_types)
+        if not types_arg:
+            return {
+                "success": False,
+                "error": "object_types was empty after stripping blanks",
+                "exported_count": 0,
+                "export_path": str(export_path),
+                "objects_by_type": {},
+            }
+        result = await _run_scoped_api(
+            app, addin, "ExportByType", [types_arg, full_export, *([override] if override else [])],
+            str(db_path), ctx, "Exporting",
+        )
+        result.setdefault("export_path", str(export_path))
+        return _attach_log_context(result, export_path, "Export")
+    
+    # Check if async export is available
+    if callback_url and op_manager:
+        # Ensure operation manager uses the correct event loop (FastMCP's loop)
+        op_manager.set_event_loop(asyncio.get_running_loop())
+        # Use async path with progress callbacks
+        operation_id, queue = op_manager.register_operation(
+            database_path=str(db_path),
+            command=command
+        )
+        callback_info = op_manager.create_callback_info(
+            operation_id, callback_url, "cursor"
+        )
+        
+        try:
+            # Call async API (Export/FullExport use VCS options)
+            async_result = addin.call_async(callback_info, command, *((override,) if override else ()))
+            
+            completion = None
+            if async_result.get("sync"):
+                # VBA returned sync result
+                op_manager.unregister_operation(operation_id)
+            elif async_result.get("async"):
+                # Wait for completion with progress reporting
+                timeout_ms = async_result.get("timeout_ms", 300000)
+                completion = await op_manager.wait_for_completion(
+                    operation_id,
+                    ctx=ctx,  # Pass context for progress reporting
+                    timeout_seconds=timeout_ms / 1000
+                )
+                
+                if not completion.get("success"):
+                    return _attach_log_context(_mark_cancelled({
+                        "success": False,
+                        "error": completion.get("error", "Export failed"),
+                        "error_pattern": completion.get("error_pattern"),
+                        "operation_id": completion.get("operation_id") or operation_id,
+                        "exported_count": 0,
+                        "export_path": str(export_path),
+                        "objects_by_type": {},
+                    }, completion), export_path, "Export", completion)
+            else:
+                # Neither marker: the add-in never started the operation,
+                # so run it synchronously rather than reporting success
+                # for work that never happened.
+                op_manager.unregister_operation(operation_id)
+                result = addin.export_source(str(db_path), str(export_path), full_export, override)
+                
+                if not result["success"]:
+                    return _attach_log_context({
+                        "success": False,
+                        "error": result["message"],
+                        "exported_count": 0,
+                        "export_path": str(export_path),
+                        "objects_by_type": {},
+                    }, export_path, "Export")
+        except Exception as e:
+            # Async call failed - fall back to sync
+            completion = None
+            op_manager.unregister_operation(operation_id)
+            result = addin.export_source(str(db_path), str(export_path), full_export, override)
+            
+            if not result["success"]:
+                return _attach_log_context({
+                    "success": False,
+                    "error": result["message"],
+                    "exported_count": 0,
+                    "export_path": str(export_path),
+                    "objects_by_type": {},
+                }, export_path, "Export")
+    else:
+        # Use sync path (no callbacks available)
+        completion = None
+        result = addin.export_source(str(db_path), str(export_path), full_export, override)
+        
+        if not result["success"]:
+            return _attach_log_context({
+                "success": False,
+                "error": result["message"],
+                "exported_count": 0,
+                "export_path": str(export_path),
+                "objects_by_type": {},
+            }, export_path, "Export")
+    
+    return _attach_log_context({
+        "success": True,
+        "export_path": str(export_path),
+        "messages": (completion or {}).get("log_messages"),
+    }, export_path, "Export", completion)
 
 
 @vcs_tool("vcs_list_objects")
@@ -1114,32 +1364,34 @@ async def vcs_import_objects(
     - Scoped calls are synchronous (no progress reporting). Prefer a single
       object via ``vcs_import_object`` when you only need one name.
     
-    ``source_dir`` must exist and is used for log resolution; the merge itself
-    reads from the project's configured export folder.
+    The merge reads from the database's own export folder, so ``source_dir``
+    must be that folder; any other folder is refused with
+    ``error_pattern: source_folder_mismatch``. In a git worktree or clone, a
+    database whose export folder is outside that working tree is refused with
+    ``export_folder_outside_working_tree``.
     
     Examples:
         # Full project merge
-        vcs_import_objects("C:\\\\db.accdb", "C:\\\\src\\\\mydb")
+        vcs_import_objects("C:\\\\src\\\\mydb.accdb", "C:\\\\src\\\\mydb.accdb.src")
         
         # Merge only queries (changed source files)
         vcs_import_objects(
-            "C:\\\\db.accdb",
-            "C:\\\\src\\\\mydb",
+            "C:\\\\src\\\\mydb.accdb",
+            "C:\\\\src\\\\mydb.accdb.src",
             object_types=["queries"],
         )
         
         # Reload every module from source, ignoring the change index
         vcs_import_objects(
-            "C:\\\\db.accdb",
-            "C:\\\\src\\\\mydb",
+            "C:\\\\src\\\\mydb.accdb",
+            "C:\\\\src\\\\mydb.accdb.src",
             object_types=["modules"],
             full_import=True,
         )
     
     Args:
         database_path: Path to Access database
-        source_dir: Directory containing source files (must exist; merge uses
-            the project's export folder)
+        source_dir: The database's export folder (must exist and match it)
         object_types: Optional categories to merge (e.g. ``["queries"]``,
             ``["modules", "forms"]``). If None, merges the entire project.
         full_import: When ``object_types`` is set: if False (default), merge
@@ -1206,6 +1458,14 @@ async def _import_objects(
                     "imported_count": 0,
                     "agent_guidance": _ADDIN_NOT_RESPONSIVE_GUIDANCE,
                 }
+
+            # The merge reads the database's export folder, not source_dir.
+            merge_folder = _database_export_folder(addin, db_path)
+            refusal = export_folder_refusal(db_path, merge_folder) or _source_folder_mismatch(
+                src_path, merge_folder
+            )
+            if refusal:
+                return refusal
 
             # Category-scoped merge: ImportByType runs synchronously in Access.
             if object_types:
@@ -1642,6 +1902,11 @@ def _build_headless_result(
     else:
         result.setdefault("output_path", output_path if result.get("success") else None)
     result["source_dir"] = str(src_path)
+    if "dataSources" in result:
+        result["data_sources"] = result.pop("dataSources")
+        warnings = data_source_warnings(result.get("output_path"), result["data_sources"])
+        if warnings:
+            result.setdefault("warnings", []).extend(warnings)
     return result
 
 
@@ -1686,6 +1951,10 @@ async def vcs_rebuild_database(
         ``errorCount``, ``warningCount``, ``durationMs``, ``log_path`` for this
         run's log, and ``log_excerpt`` (tail of the log) on failure. A build
         refused before it started carries only ``success`` and ``error``.
+        With add-in 5.2.0 or later, ``data_sources`` lists each linked back end
+        and library reference with its ``kind`` (``project``, ``outside``,
+        ``network``, ``server``, ``missing``); ``warnings`` flags missing ones,
+        and shared ones when the database is in a git worktree.
     
     The add-in gitignores its ``logs`` folder, so Glob/Grep will not find
     these files. Open ``log_path`` directly, or call vcs_get_log("Build").
@@ -1698,11 +1967,15 @@ async def vcs_rebuild_database(
         
         # Validate source directory
         src_path = validate_source_directory(source_dir)
+        refusal = build_source_refusal(src_path)
+        if refusal:
+            return refusal
         
         # Check if target database is already busy (if it exists)
-        if output_path:
-            close_owned_instances_holding([output_path])
-            busy_error = _check_database_busy(output_path)
+        target = _build_target(src_path, output_path)
+        if target:
+            close_owned_instances_holding([target])
+            busy_error = _check_database_busy(target)
             if busy_error:
                 return busy_error
         
@@ -1802,6 +2075,11 @@ async def vcs_rebuild_addin(
     """
     Rebuild the VCS add-in from source and wait until it is installed.
 
+    The install is machine-wide: every Access session on this computer then
+    loads this build, and Access windows this server created with the add-in
+    loaded are closed first. From a git worktree, a completed result carries
+    ``installed_from_worktree`` and ``main_checkout``; tell the user.
+
     Derives the development copy (the ``Version Control.accda`` beside
     ``source_dir``), launches ``RebuildAddIn``, and watches
     ``<source>/logs/rebuild-status.json`` until this attempt reaches
@@ -1893,7 +2171,9 @@ async def vcs_rebuild_addin(
         preexisting_access_pids = list_access_pids()
 
         gate = get_access_gate()
-        launch = await gate.run_exclusive(
+        # Every lane's Access instance has the add-in loaded, and the launch
+        # closes the ones this server created, so no lane may be mid-call.
+        launch = await gate.run_exclusive_all(
             "vcs_rebuild_addin",
             str(host_path),
             _launch,
@@ -1984,6 +2264,8 @@ async def vcs_rebuild_addin(
             watched["rebuild_status_before"] = status_before
         if launch.get("rebuild_status_superseded") is not None:
             watched["rebuild_status_superseded"] = launch["rebuild_status_superseded"]
+        if watched.get("status") == "complete":
+            watched.update(worktree_install_fields(src_path))
         return watched
 
     except PermissionError as e:
@@ -2105,11 +2387,12 @@ def vcs_tips(topic: str | None = None) -> dict[str, Any]:
     """
     Guidance for situations the server instructions only mention: troubleshooting
     stuck or hung Access, dialogs and VBA break mode, timeouts, server_busy, VBA
-    compile errors, finding logs, writing code for vcs_run_vba, and developing or
-    testing the VCS add-in itself (its rebuild and self-tests).
+    compile errors, finding logs, writing code for vcs_run_vba, working in a git
+    worktree or alongside other agents, and developing or testing the VCS add-in
+    itself (its rebuild and self-tests).
 
     Call with no topic for the list. Topics: addin-development, stuck, compile,
-    logs, run-vba. An unknown topic is matched against topic text. Works while
+    logs, run-vba, worktrees. An unknown topic is matched against topic text. Works while
     Access is blocked or another call is running.
 
     Args:
@@ -2496,13 +2779,19 @@ def vcs_compile_vba(
 def vcs_export_object(
     database_path: str,
     object_type: str,
-    object_name: str = ""
+    object_name: str = "",
+    output_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Export a single database object or component type to source files.
     
     Exports one object to its source file representation. Much faster than a
     full database export when you only need to refresh one object.
+
+    ``output_dir`` writes the object to another folder instead of the
+    database's export folder (add-in 5.2.0 or later), with the same rules as
+    vcs_export_database: a folder holding a ``vcs-index.idx`` is refused, and
+    in a git worktree or clone the folder must be inside that working tree.
     
     Accepts singular or plural type names. For single-file component types
     (like vbe_project or db_property), the object_name is ignored.
@@ -2526,6 +2815,8 @@ def vcs_export_object(
             Plural forms and common aliases are also accepted.
         object_name: Name of the object to export. Required for multi-file
             types, ignored for single-file types.
+        output_dir: Optional folder to export to instead of the database's
+            export folder.
     
     Returns:
         Dictionary with success status, file path, and any errors, plus
@@ -2543,10 +2834,20 @@ def vcs_export_object(
             config = get_config()
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
-            
-            result_json = addin.call_sync("ExportObject", object_type, object_name)
-            
-            return _addin_json_result(result_json)
+
+            export_path, override, refusal = _resolve_export_target(addin, db_path, output_dir)
+            if refusal:
+                return refusal
+            busy = _claim_export_folder(export_path, "vcs_export_object")
+            if busy:
+                return busy
+            try:
+                args = (object_type, object_name) + ((override,) if override else ())
+                result = _addin_json_result(addin.call_sync("ExportObject", *args))
+            finally:
+                _release_export_folder(export_path)
+            result.setdefault("export_path", str(export_path))
+            return result
     
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2606,6 +2907,10 @@ def vcs_import_object(
             
             addin = VCSAddinIntegration(config.get("ACCESS_VCS_ADDIN_PATH"))
             addin.load_addin(app, db_path=str(db_path))
+
+            refusal = export_folder_refusal(db_path, _database_export_folder(addin, db_path))
+            if refusal:
+                return refusal
             
             result_json = addin.call_sync("ImportObject", object_type, object_name)
             
@@ -3261,6 +3566,21 @@ def vcs_set_option(
     """
     if _is_user_controlled_option(option_name):
         return _user_controlled_option_refusal(option_name)
+    if str(option_name).strip().lower() == "exportfolder":
+        return {
+            "success": False,
+            "error": (
+                "ExportFolder cannot be set for a session. Session overrides are stored "
+                "inside the export folder, so an export reloads options from the old "
+                "folder and never sees the new value."
+            ),
+            "error_pattern": "export_folder_not_settable",
+            "agent_guidance": (
+                "To export somewhere else once, pass output_dir to vcs_export_database "
+                "or vcs_export_object. To change the project's export folder, ask the user "
+                "to change it in the add-in's options."
+            ),
+        }
 
     try:
         db_path = validate_database_path(database_path)

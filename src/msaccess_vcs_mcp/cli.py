@@ -46,7 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = sub.add_parser("export", help="Export a database to source files")
     export.add_argument("database_path")
-    export.add_argument("output_dir")
+    export.add_argument(
+        "output_dir",
+        nargs="?",
+        default=None,
+        help="Folder to export to instead of the database's export folder (add-in 5.2.0 or later)",
+    )
     export.add_argument(
         "--full",
         action="store_true",

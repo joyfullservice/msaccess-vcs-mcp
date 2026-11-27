@@ -65,4 +65,5 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "integration: marks tests as integration tests (require Access installed)",
+    "concurrency: multi-instance Access suite; skipped unless pytest runs with --run-concurrency",
 ]

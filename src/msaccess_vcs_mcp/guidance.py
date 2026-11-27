@@ -34,8 +34,9 @@ BY_ERROR_PATTERN = {
         "raised an error that Access showed as a dialog. " + STUCK
     ),
     "server_busy": (
-        "Another call holds Access (see busy_with). Retry this call in a few seconds, "
-        "and issue Access calls one at a time rather than in parallel."
+        "Another call holds this database or the whole server (see busy_with). Retry "
+        "this call in a few seconds, and issue calls on one database one at a time "
+        "rather than in parallel."
     ),
     "installed_addin_refused": (
         "Pass the development copy instead: the Version Control.accda beside "

@@ -15,6 +15,8 @@ Edit the files in `Version Control.accda.src`, then call:
 
 It builds the development copy, installs it, and returns when the status is `complete`, `cancelled`, or a `*-failed` status. Do not host the rebuild on a user database, the repository's Testing folder, or a scratch database. `vcs_rebuild_database` is a different tool: it builds a user project.
 
+- The install is machine-wide: every Access session on this computer, including the user's own work and other agents' test runs, loads the new build. The rebuild also closes every Access window this server created that had the add-in loaded. From a git worktree the result carries `installed_from_worktree` and `main_checkout`; tell the user, and when the branch is done, rebuild from the main checkout. See `vcs_tips("worktrees")`.
+
 - `refused`: nothing was rebuilt. An Access window the server did not create holds a file the rebuild must replace. `otherInstances` names each process and the file it holds. Ask the user to close those windows, then call again. Never close them yourself.
 - `launch-failed`: the helper script never started. Access is left open and the call is safe to retry.
 - If the client times out (`-32001`), call `vcs_get_recent_calls()`, then read `<source>/logs/rebuild-status.json`. A status whose `phaseStarted` predates your call belongs to an earlier run.
