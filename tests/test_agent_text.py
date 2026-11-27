@@ -9,6 +9,7 @@ reachable from it: an unlinked doc is rarely opened.
 """
 
 import ast
+import inspect
 import re
 from pathlib import Path
 
@@ -74,6 +75,13 @@ def test_instructions_fit():
 @pytest.mark.parametrize("tool", _tools(), ids=lambda t: t.name)
 def test_description_fits(tool):
     assert len(tool.description or "") <= DESCRIPTION_LIMIT
+
+
+@pytest.mark.parametrize("tool", _tools(), ids=lambda t: t.name)
+def test_description_is_dedented(tool):
+    # Python 3.13+ dedents docstrings at compile time and earlier versions do
+    # not, so an undedented description has a different length on each.
+    assert tool.description == inspect.cleandoc(tool.description or "")
 
 
 @pytest.mark.parametrize("phrase", [

@@ -748,7 +748,9 @@ def vcs_tool(
             )
 
         return mcp.tool(
-            annotations=annotations or _default_annotations(name), meta=meta
+            description=inspect.cleandoc(func.__doc__ or ""),
+            annotations=annotations or _default_annotations(name),
+            meta=meta,
         )(with_refresh)
     return decorator
 
