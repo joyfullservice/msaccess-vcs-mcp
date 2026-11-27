@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "msaccess-vcs-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for Microsoft Access database version control"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,7 @@ authors = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -44,6 +45,12 @@ dev = [
 [project.scripts]
 msaccess-vcs-mcp = "msaccess_vcs_mcp.main:main"
 msaccess-vcs = "msaccess_vcs_mcp.cli:main"
+
+[tool.uv]
+# Relative exclude-newer durations need uv 0.9.17+; older versions ignore these settings.
+required-version = ">=0.9.17"
+# Supply-chain cooldown for lock resolution; matches the Dependabot cooldown.
+exclude-newer = "3 days"
 
 [tool.setuptools.packages.find]
 where = ["src"]

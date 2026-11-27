@@ -19,6 +19,8 @@ python -m venv venv
 pip install -e ".[dev]"
 ```
 
+CI and the PyPI publish workflow install from the committed `uv.lock`. After changing a dependency in `pyproject.toml`, run `uv lock` and commit the lock. Releases and the lock's 3-day cooldown are covered in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ### Running Tests
 
 Tests must run inside the activated virtual environment:

@@ -74,6 +74,45 @@ contradictory guidance.
 
 ---
 
+## 2026-11-27 — Publish to PyPI from a GitHub Release, locked with uv
+
+**Trigger**: The README told users to install with
+`uvx msaccess-vcs-mcp@latest`, but the package had never been published, so
+the documented install failed for anyone who was not running from a clone.
+
+**Options explored**:
+- Install from the GitHub URL (`uvx --from git+https://...`): rejected. Users
+  get whatever is on `main` with no version to report or pin, and every
+  launch fetches the repository.
+- Upload from a workstation with an API token: rejected. A long-lived token
+  can be leaked, and nothing ties an upload to a tested commit.
+- **Chosen**: the same pattern as db-inspector-mcp. Publishing a GitHub
+  Release runs `publish.yml`: unit tests on Windows, `uv build`, `twine
+  check`, then upload through PyPI trusted publishing from the `pypi`
+  environment. The build job refuses a tag that does not match
+  `pyproject.toml`. CI installs from a committed `uv.lock` resolved with a
+  3-day `exclude-newer` cooldown, matched by Dependabot's cooldown, and runs
+  `uv audit`.
+
+**Decision**: Releases are cut from a GitHub Release, never uploaded by hand.
+The editable `venv/` install stays the day-to-day environment; the lock
+governs CI and the published build's tests. The version is the server's own
+(0.2.0 for the first release), separate from the add-in's; features that need
+a newer add-in check its version at runtime.
+
+**What this rules out**: Manual `twine upload`; publishing a version whose
+tag and `pyproject.toml` disagree. CI cannot run the integration tests
+(GitHub's Windows runners have no Access), so the release checklist runs them
+locally. Revisit the cooldown if a security fix has to ship inside it more
+than occasionally.
+
+**Relevant files**: `.github/workflows/publish.yml`, `.github/workflows/ci.yml`,
+`.github/dependabot.yml`, `pyproject.toml` (`[tool.uv]`), `uv.lock`,
+`CONTRIBUTING.md`, `src/msaccess_vcs_mcp/main.py` (`--help` and `--version`
+now exit before startup).
+
+---
+
 ## 2026-11-27 — Saved screenshots: opt-in per call, expire by age
 
 **Trigger**: Agents could see a `vcs_capture_screenshot` image but not show

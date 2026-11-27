@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    # Supply-chain hardening: don't adopt brand-new releases immediately.
+    cooldown:
+      default-days: 3
+    ignore:
+      # mcp 2.x removed mcp.server.fastmcp, which tools.py is built on.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
