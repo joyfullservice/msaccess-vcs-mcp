@@ -89,6 +89,7 @@ from .rebuild_watcher import (
 )
 from .operation_manager import MonotonicProgressReporter
 from . import screenshot as _screenshot
+from . import screenshot_store as _screenshot_store
 from .vba_worker_manager import get_build_timeout, get_call_vba_timeout, run_vba_resilient
 
 _COMPILE_FAILURE_AGENT_GUIDANCE = (
@@ -651,6 +652,7 @@ def vcs_tool(
                 ctx = None
             await _ensure_env_loaded(ctx)
             load_config()
+            _screenshot_store.start_prune_once()
 
             refusal = _refuse_installed_addin_target(name, func, args, kwargs)
             if refusal is not None:
@@ -3487,6 +3489,7 @@ async def vcs_capture_screenshot(
     include_image: bool = True,
     view: Literal["normal", "design"] = "normal",
     settle_ms: int = _screenshot.DEFAULT_SETTLE_MS,
+    save_image: bool = False,
 ) -> CallToolResult:
     """
     Capture a PNG of a running Access window, plus the text of its dialogs.
@@ -3540,6 +3543,10 @@ async def vcs_capture_screenshot(
             with open_if_closed.
         settle_ms: Wait after opening an object before capturing (0-5000,
             default 150). Raise it when an opened form shows blank controls.
+        save_image: Also write the PNG to the server's screenshot folder and
+            return ``image.saved_path`` and ``image.markdown``; paste the
+            markdown into your reply to show the user. Keep include_image=True
+            when you will describe it. Saved files expire (30 days by default).
 
     Returns:
         A JSON metadata block (``success``, ``pid``, ``owned_by_server``,
@@ -3551,7 +3558,7 @@ async def vcs_capture_screenshot(
     that does not answer messages is copied from the screen instead
     (``capture_method: "screen"``), with other applications' windows grayed out.
     With ``Application.Echo False`` the capture shows a stale frame. Captures
-    can show client data; they are returned inline and never saved to disk.
+    can show client data; they are written to disk only with save_image.
     """
     if database_path:
         try:
@@ -3570,6 +3577,7 @@ async def vcs_capture_screenshot(
         get_gate=get_access_gate,
         view=view,
         settle_ms=settle_ms,
+        save_image=save_image,
     )
 
 

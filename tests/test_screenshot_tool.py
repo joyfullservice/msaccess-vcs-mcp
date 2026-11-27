@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +21,7 @@ from mcp.types import CallToolResult
 
 import msaccess_vcs_mcp.screen_capture as sc
 import msaccess_vcs_mcp.screenshot as shot
+import msaccess_vcs_mcp.screenshot_store as store
 from msaccess_vcs_mcp.screen_capture import Rect, WindowInfo
 
 DB = r"C:\path\to\example.accdb"
@@ -785,6 +788,192 @@ def test_capture_failure_is_reported(routing, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Saving for the chat
+# ---------------------------------------------------------------------------
+
+
+def _touch(folder, name, age_days):
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / name
+    path.write_bytes(PNG)
+    stamp = time.time() - age_days * store.SECONDS_PER_DAY
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+OLD_SHOT = "vcs-shot-20260101-120000-application-0123abcd.png"
+NEW_SHOT = "vcs-shot-20261120-120000-vbe-89abcdef.png"
+
+
+def test_save_image_writes_a_file_and_returns_a_link(routing, screenshot_dir):
+    result = _run(save_image=True, get_gate=lambda: None)
+    image = meta_of(result)["image"]
+    path = Path(image["saved_path"])
+    assert path.parent == screenshot_dir
+    assert store.NAME_PATTERN.match(path.name)
+    assert "-application-" in path.name
+    assert path.read_bytes() == PNG
+    assert image["target"] == "application"
+    assert image["markdown"] == store.markdown_link(path, "application")
+    assert image["markdown"].startswith("![Access window](/")
+    assert [c.type for c in result.content] == ["text", "image"]
+
+
+def test_save_without_include_image_returns_text_only(routing):
+    result = _run(save_image=True, include_image=False, get_gate=lambda: None)
+    assert [c.type for c in result.content] == ["text"]
+    assert Path(meta_of(result)["image"]["saved_path"]).read_bytes() == PNG
+
+
+def test_no_save_image_writes_nothing(routing, screenshot_dir):
+    meta = meta_of(_run(include_image=False, get_gate=lambda: None))
+    assert "image" not in meta or "saved_path" not in meta["image"]
+    assert not screenshot_dir.exists()
+
+
+def test_object_capture_is_saved_as_object(routing, monkeypatch):
+    monkeypatch.setattr(
+        shot, "capture_object_sync",
+        lambda request: {"fallback": False,
+                         "outcome": shot.Outcome(meta={"window": {}}, png=PNG)},
+    )
+    meta = meta_of(_run(target="object", object_type="form", object_name="frmExample",
+                        save_image=True, get_gate=lambda: _Gate()))
+    assert meta["image"]["target"] == "object"
+    assert "-object-" in Path(meta["image"]["saved_path"]).name
+    assert "frmExample" not in meta["image"]["saved_path"]
+
+
+def test_busy_fallback_is_saved_as_application(routing):
+    gate = _Gate(in_flight=SimpleNamespace(tool="vcs_export_database", database=DB))
+    meta = meta_of(_run(target="active", save_image=True, get_gate=lambda: gate))
+    assert meta["error_pattern"] == "server_busy"
+    assert meta["image"]["target"] == "application"
+    assert "-application-" in Path(meta["image"]["saved_path"]).name
+
+
+def test_blocked_fallback_is_saved_as_application(routing):
+    error = shot.ScreenshotError("access_blocked", "Access is blocked by a dialog.")
+    gate = _Gate(result={"fallback": True, "error": error})
+    meta = meta_of(_run(target="active", save_image=True, get_gate=lambda: gate))
+    assert meta["error_pattern"] == "access_blocked"
+    assert meta["image"]["target"] == "application"
+
+
+def test_minimized_window_warns_that_nothing_was_saved(routing, monkeypatch, screenshot_dir):
+    def minimized(*args, **kwargs):
+        raise shot.ScreenshotError("window_minimized", "The window is minimized.")
+
+    monkeypatch.setattr(shot, "capture_process", minimized)
+    meta = meta_of(_run(save_image=True, get_gate=lambda: None))
+    assert meta["error_pattern"] == "window_minimized"
+    assert any("nothing was saved" in w for w in meta["warnings"])
+    assert not screenshot_dir.exists()
+
+
+def test_invalid_argument_has_no_save_warning(routing):
+    meta = meta_of(_run(target="object", save_image=True, get_gate=lambda: None))
+    assert meta["error_pattern"] == "invalid_argument"
+    assert not any("saved" in w for w in meta.get("warnings", []))
+
+
+def test_write_failure_is_a_warning(routing, monkeypatch):
+    def full(png, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "save_png", full)
+    meta = meta_of(_run(save_image=True, get_gate=lambda: None))
+    assert meta["success"] is True
+    assert "saved_path" not in meta.get("image", {})
+    assert any("could not be saved" in w and "disk full" in w for w in meta["warnings"])
+
+
+def test_failed_write_leaves_no_partial_file(screenshot_dir):
+    with pytest.raises(TypeError):
+        store.save_png("not bytes", "application")
+    assert list(screenshot_dir.iterdir()) == []
+
+
+def test_prune_deletes_only_expired_screenshots(screenshot_dir):
+    old = _touch(screenshot_dir, OLD_SHOT, 31)
+    new = _touch(screenshot_dir, NEW_SHOT, 1)
+    other = _touch(screenshot_dir, "notes.png", 400)
+    lookalike = _touch(screenshot_dir, "vcs-shot-old.png", 400)
+    assert store.prune_expired(screenshot_dir, 30) == 1
+    assert not old.exists()
+    assert new.exists() and other.exists() and lookalike.exists()
+
+
+def test_zero_retention_keeps_everything(screenshot_dir):
+    old = _touch(screenshot_dir, OLD_SHOT, 400)
+    assert store.prune_expired(screenshot_dir, 0) == 0
+    assert old.exists()
+
+
+def test_save_prunes_expired_files(routing, screenshot_dir):
+    old = _touch(screenshot_dir, OLD_SHOT, 31)
+    _run(save_image=True, get_gate=lambda: None)
+    assert not old.exists()
+
+
+def test_locked_or_vanished_files_are_skipped(screenshot_dir, monkeypatch):
+    locked = _touch(screenshot_dir, OLD_SHOT, 31)
+    expired = _touch(screenshot_dir, "vcs-shot-20260102-120000-vbe-fedcba98.png", 31)
+    real_unlink = os.unlink
+
+    def unlink(path):
+        if os.path.basename(path) == locked.name:
+            raise PermissionError("in use")
+        real_unlink(path)
+
+    monkeypatch.setattr(store.os, "unlink", unlink)
+    assert store.prune_expired(screenshot_dir, 30) == 1
+    assert locked.exists() and not expired.exists()
+    assert store.prune_expired(screenshot_dir / "missing", 30) == 0
+
+
+@pytest.mark.parametrize("value, expected", [("7", 7.0), ("0", 0.0), ("nope", 30.0), ("-1", 30.0)])
+def test_retention_days_env(monkeypatch, value, expected):
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", value)
+    assert store.retention_days() == expected
+
+
+def test_screenshot_dir_strips_quotes_and_expands(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_DIR", f'"{tmp_path / "shots"}"')
+    assert store.screenshot_dir() == (tmp_path / "shots").resolve()
+    monkeypatch.delenv("ACCESS_VCS_SCREENSHOT_DIR")
+    assert store.screenshot_dir() == Path.home() / ".msaccess-vcs-mcp" / "screenshots"
+
+
+def test_markdown_link_encodes_special_characters():
+    path = PureWindowsPath(r"C:\Users\Jane Doe\a b (c)#%é\vcs-shot.png")
+    assert store.markdown_link(path, "vbe") == (
+        "![VBA editor](/C:/Users/Jane%20Doe/a%20b%20%28c%29%23%25%C3%A9/vcs-shot.png)"
+    )
+
+
+def test_prune_once_uses_the_settings_in_force_and_runs_once(screenshot_dir, monkeypatch):
+    old = _touch(screenshot_dir, OLD_SHOT, 10)
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", "5")
+    thread = store.start_prune_once()
+    thread.join(5)
+    assert not old.exists()
+    assert store.start_prune_once() is None
+
+
+def test_prune_once_keeps_files_when_retention_is_zero(screenshot_dir, monkeypatch):
+    old = _touch(screenshot_dir, OLD_SHOT, 400)
+    monkeypatch.setenv("ACCESS_VCS_SCREENSHOT_RETENTION_DAYS", "0")
+    assert store.start_prune_once() is None
+    assert old.exists()
+
+
+def test_prune_once_never_creates_the_folder(screenshot_dir):
+    assert store.start_prune_once() is None
+    assert not screenshot_dir.exists()
+
+
+# ---------------------------------------------------------------------------
 # FastMCP end to end
 # ---------------------------------------------------------------------------
 
@@ -796,6 +985,7 @@ def test_fastmcp_returns_text_then_image(routing, monkeypatch):
     tool = tools_module.mcp._tool_manager.get_tool("vcs_capture_screenshot")
     assert tool.fn_metadata.output_schema is None
     assert tool.parameters["properties"]["target"]["enum"] == list(shot.TARGETS)
+    assert tool.parameters["properties"]["save_image"]["default"] is False
 
     result = asyncio.run(
         tools_module.mcp.call_tool("vcs_capture_screenshot", {"database_path": DB})
@@ -806,6 +996,7 @@ def test_fastmcp_returns_text_then_image(routing, monkeypatch):
     assert result.content[1].mimeType == "image/png"
     assert meta_of(result)["success"] is True
     assert result.structuredContent is None
+    assert store._prune_started is True
 
 
 def test_fastmcp_invalid_database_path(monkeypatch):

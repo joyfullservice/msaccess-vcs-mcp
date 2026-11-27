@@ -74,6 +74,67 @@ contradictory guidance.
 
 ---
 
+## 2026-11-27 — Saved screenshots: opt-in per call, expire by age
+
+**Trigger**: Agents could see a `vcs_capture_screenshot` image but not show
+it: the PNG only appeared inside the collapsed tool result. Cursor's chat
+renders a local image only from a Markdown link written `/C:/...` (forward
+slashes, leading slash). `C:\...`, `C:/...`, and `file:///` do not render.
+That needs a file on disk, which the tool had never written, because
+captures can show client data.
+
+**Options explored**:
+- Newest-N count (first draft, 50): rejected. A busy day, a test run, or a
+  second Cursor window evicts images that today's chat still shows, and files
+  from a quiet week stay forever.
+- A size or count cap on top of age: rejected. It brings back eviction of
+  recent images to guard against bursts that opt-in saving makes unlikely.
+- No pruning: rejected; client pixels would stay on disk with no end date.
+- Delete at session end: rejected. The server restarts a median of every
+  6.8 minutes, so images would break mid-conversation.
+- `%TEMP%`: rejected; Storage Sense deletes on its own schedule.
+- `%LOCALAPPDATA%`: rejected. It splits server state across two profile
+  roots; a roaming profile is handled by `ACCESS_VCS_SCREENSHOT_DIR`.
+- A per-workspace or agent-chosen folder: rejected. Either is one `git add`
+  from a commit, and the server cannot reliably tell which workspace a call
+  came from.
+- Prune at startup in `main.py`: rejected. It runs before the workspace
+  `.env` loads, so it could delete files a user had set to keep.
+- Refuse `include_image=False` with `save_image=True`: rejected. The user
+  asked for posting without image tokens; the docstring says the agent has
+  not seen those pixels.
+- Drop `readOnlyHint`: rejected. Every read-only tool already writes the
+  usage log, the tool writes only the server's own folder, and dropping the
+  hint could add confirmation prompts to routine stuck-Access checks.
+- **Chosen**: `save_image=True` writes `vcs-shot-YYYYMMDD-HHMMSS-<target>-<8
+  hex>.png` to `~/.msaccess-vcs-mcp/screenshots/` and returns `saved_path`,
+  `markdown`, and the `target` the pixels show (`application` for a
+  fallback). Files older than `ACCESS_VCS_SCREENSHOT_RETENTION_DAYS` (30, `0`
+  keeps them) are deleted after each save and once per process after the
+  first `load_config()`, off the event loop. Only `vcs-shot-` names past the
+  limit are ever deleted, so concurrent pruners and shared folders are safe.
+
+**Decision**: Opt-in per call, kept for a fixed age. The pixels repeat data
+already on the machine in the database, so the risks worth designing for are
+a commit and a sync, which the folder location covers; 30 days keeps last
+month's chats intact. The cost is that a chat older than the retention
+period loses its images. Checked in Cursor (2026-11-27): a link under a folder
+named with spaces and parentheses, percent-encoded, rendered; the same link
+posted after its file was deleted showed nothing, so Cursor reads the file
+when it displays the chat rather than keeping a copy.
+
+**What this rules out**: Object or database names in file names; writing
+into a repository or workspace by default; a count cap. Revisit the default
+if Cursor starts copying images into the chat, which would let files expire
+much sooner.
+
+**Relevant files**: `src/msaccess_vcs_mcp/screenshot_store.py`,
+`src/msaccess_vcs_mcp/screenshot.py` (`_finish`, `capture_screenshot`),
+`src/msaccess_vcs_mcp/tools.py` (`vcs_capture_screenshot`, `vcs_tool`),
+`tests/conftest.py`, `tests/test_screenshot_tool.py`.
+
+---
+
 ## 2026-11-24 — Rules in the instructions, next steps in results, depth in vcs_tips
 
 **Trigger**: The server instructions had grown to 10,205 characters. Claude

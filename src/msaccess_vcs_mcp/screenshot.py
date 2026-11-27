@@ -27,6 +27,7 @@ from mcp.server.fastmcp import Image
 from mcp.types import CallToolResult, TextContent
 
 from . import screen_capture as sc
+from . import screenshot_store
 from .access_com.instance_registry import list_owned, paths_match
 from .access_com.process_qos import list_access_pids_or_none, pid_from_access_app
 
@@ -931,21 +932,56 @@ async def _in_thread(fn: Callable[[], Any], timeout: float = CAPTURE_TIMEOUT_SEC
         ) from exc
 
 
+def _add_warning(meta: dict[str, Any], warning: str) -> None:
+    meta["warnings"] = [*(meta.get("warnings") or []), warning]
+
+
+async def _finish(
+    meta: dict[str, Any],
+    png: bytes | None,
+    *,
+    include_image: bool,
+    save_image: bool,
+    captured: str,
+) -> CallToolResult:
+    """Save the PNG when asked, then build the result; inline only when asked.
+
+    ``captured`` is the target the pixels show, which for a fallback is
+    ``application`` whatever was requested.
+    """
+    if save_image:
+        if png:
+            try:
+                path = await _in_thread(lambda: screenshot_store.save_and_prune(png, captured))
+            except Exception as exc:
+                _add_warning(meta, f"The screenshot could not be saved: {exc}")
+            else:
+                image = meta.setdefault("image", {})
+                image["saved_path"] = str(path)
+                image["markdown"] = screenshot_store.markdown_link(path, captured)
+                image["target"] = captured
+        elif meta.get("error_pattern") != "invalid_argument":
+            _add_warning(meta, "save_image: no image was captured, so nothing was saved.")
+    return build_result(meta, png if include_image else None)
+
+
 async def _with_application_capture(
     error: ScreenshotError, base: dict[str, Any], pid: int, max_dimension: int,
-    include_image: bool,
+    include_image: bool, save_image: bool = False,
 ) -> CallToolResult:
     """An error result carrying a gate-free application capture and dialogs."""
     try:
         meta, png = await _in_thread(
-            lambda: capture_application_meta(pid, max_dimension, include_image)
+            lambda: capture_application_meta(pid, max_dimension, include_image or save_image)
         )
     except ScreenshotError as exc:
         meta, png = {"warnings": [str(exc)]}, None
     result = dict(base)
     result.update(meta)
     result.update(error.meta())
-    return build_result(result, png)
+    return await _finish(
+        result, png, include_image=include_image, save_image=save_image, captured="application"
+    )
 
 
 async def capture_screenshot(
@@ -961,8 +997,16 @@ async def capture_screenshot(
     get_gate: Callable[[], Any],
     view: str = "normal",
     settle_ms: int = DEFAULT_SETTLE_MS,
+    save_image: bool = False,
 ) -> CallToolResult:
     base: dict[str, Any] = {"target": target}
+    pixels = include_image or save_image
+
+    async def finish(meta: dict[str, Any], png: bytes | None = None) -> CallToolResult:
+        return await _finish(
+            meta, png, include_image=include_image, save_image=save_image, captured=target
+        )
+
     try:
         validate_arguments(
             database_path, target, object_type, object_name, open_if_closed, pid, max_dimension,
@@ -970,7 +1014,7 @@ async def capture_screenshot(
         )
         resolved_pid, source = await _in_thread(lambda: resolve_target_pid(database_path, pid))
     except ScreenshotError as exc:
-        return build_result({**base, **exc.meta()})
+        return await finish({**base, **exc.meta()})
     owned = await _in_thread(lambda: server_owns(resolved_pid))
     base.update(pid=resolved_pid, pid_source=source, owned_by_server=owned)
 
@@ -978,16 +1022,14 @@ async def capture_screenshot(
         try:
             outcome = await _in_thread(
                 lambda: capture_process(
-                    resolved_pid, target, max_dimension=max_dimension, include_image=include_image
+                    resolved_pid, target, max_dimension=max_dimension, include_image=pixels
                 )
             )
         except ScreenshotError as exc:
-            return build_result({**base, **exc.meta()})
+            return await finish({**base, **exc.meta()})
         except Exception as exc:
-            return build_result(
-                {**base, **ScreenshotError("capture_failed", str(exc)).meta()}
-            )
-        return build_result({"success": True, **base, **outcome.meta}, outcome.png)
+            return await finish({**base, **ScreenshotError("capture_failed", str(exc)).meta()})
+        return await finish({"success": True, **base, **outcome.meta}, outcome.png)
 
     gate = get_gate()
     in_flight = gate.current_in_flight()
@@ -999,7 +1041,7 @@ async def capture_screenshot(
             busy_with={"tool": in_flight.tool, "database": in_flight.database},
         )
         return await _with_application_capture(
-            busy, base, resolved_pid, max_dimension, include_image
+            busy, base, resolved_pid, max_dimension, include_image, save_image
         )
 
     request = ObjectRequest(
@@ -1010,7 +1052,7 @@ async def capture_screenshot(
         object_name=object_name,
         open_if_closed=open_if_closed,
         max_dimension=max_dimension,
-        include_image=include_image,
+        include_image=pixels,
         view=view,
         settle_ms=settle_ms,
     )
@@ -1022,13 +1064,13 @@ async def capture_screenshot(
             "server_busy", result.get("error", "Server busy."), busy_with=result.get("busy_with")
         )
         return await _with_application_capture(
-            busy, base, resolved_pid, max_dimension, include_image
+            busy, base, resolved_pid, max_dimension, include_image, save_image
         )
     if result.get("fallback"):
         return await _with_application_capture(
-            result["error"], base, resolved_pid, max_dimension, include_image
+            result["error"], base, resolved_pid, max_dimension, include_image, save_image
         )
     if "error" in result:
-        return build_result({**base, **result["error"].meta()})
+        return await finish({**base, **result["error"].meta()})
     outcome = result["outcome"]
-    return build_result({"success": True, **base, **outcome.meta}, outcome.png)
+    return await finish({"success": True, **base, **outcome.meta}, outcome.png)
