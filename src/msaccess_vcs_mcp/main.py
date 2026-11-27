@@ -1,5 +1,6 @@
 """Main entry point for msaccess-vcs-mcp MCP server."""
 
+import argparse
 import asyncio
 import atexit
 import os
@@ -121,8 +122,23 @@ def _log_server_shutdown() -> None:
     log_diagnostic_event("server_shutdown", session_id=_session_id)
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="msaccess-vcs-mcp",
+        description="MCP server for Microsoft Access version control, driving the MSAccess VCS add-in.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"])
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args, _ = parser.parse_known_args(argv)
+    return args
+
+
 def main() -> None:
     """Main entry point for the MCP server."""
+    args = _parse_args()
+
     # Always-on lifecycle event: emitted before .env discovery so we still
     # have a record even when the project root cannot be resolved.
     log_diagnostic_event(
@@ -256,14 +272,6 @@ def main() -> None:
         enabled=usage_enabled,
         log_file=str(usage_path) if usage_path else None,
     )
-
-    # Parse transport arguments
-    import argparse
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"])
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
-    args, _ = parser.parse_known_args()
 
     # Import and run MCP server
     from .tools import mcp
