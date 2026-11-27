@@ -1,0 +1,13 @@
+# What agents are told, and where
+
+How the server's guidance reaches an agent using it: the server instructions, tool descriptions, fields in results, and the `vcs_tips` topics. Read this before changing `SERVER_INSTRUCTIONS`, a tool description, `guidance.py`, `access_state.py`, or a file in [tips/](../src/msaccess_vcs_mcp/tips/).
+
+Claude Code cuts server instructions, and any tool description it loads upfront, at 4,096 characters; some other clients never show the instructions to the model. Guidance is split three ways so nothing an agent needs depends on the instructions surviving:
+
+- **Instructions** (`SERVER_INSTRUCTIONS` in `tools.py`, 3,500 characters or fewer): the rules every call needs, with the installed-add-in rule, no parallel calls, the stuck-Access call, and the `vcs_tips` triggers in the first 2,000 characters. No tool reference; every client lists the tools.
+- **Results**: a failed result carries `agent_guidance`, one sentence naming the next call. A successful result carries it only when it needs a decision from the user (see [User settings](configuration.md#user-settings)). `guidance.py` fills it in the `vcs_tool` wrapper from `error_pattern` (and a refused `vcs_rebuild_addin`) when the code that built the result did not. Never put guidance or dialog text in `error`; the usage log records that field. On `timeout` and `access_unresponsive`, `access_state.py` also attaches `access_state` (`pid`, `owned_by_server`, `vbe_state`, `modal_blocked`, `dialogs` with text capped at 500 characters) and guidance naming the `dialog_id` or `vcs_reset_vba()`. It reads windows only, through the screenshot resolver, under a 5-second deadline, and only when the call named a database (for `vcs_rebuild_addin`, the development copy beside `source_dir`), because the resolver's single-instance shortcut could describe an unrelated window.
+- **`vcs_tips(topic)`**: depth for one situation, from the files in [src/msaccess_vcs_mcp/tips/](../src/msaccess_vcs_mcp/tips/), one topic per file. Gate-exempt, and the only tool registered with `meta={"anthropic/alwaysLoad": True}`.
+
+`tests/test_agent_text.py` enforces the limits and checks that every `vcs_*` name and `vcs_tips` topic mentioned anywhere exists. When a behaviour described in a topic changes, update the topic in the same change. A module whose string literals become agent guidance belongs in that test's `GUIDANCE_SOURCES`, so its tool names are checked too.
+
+The same test keeps `AGENTS.md`, which agents changing the server read, within its budget: 6,000 characters of content, and a routing table of at most 2,400 characters and 20 rows. Depth goes in a `docs/` file with a routing row, and every `docs/*.md` must be linked from `AGENTS.md`.

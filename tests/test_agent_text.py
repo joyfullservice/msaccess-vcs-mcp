@@ -2,6 +2,10 @@
 
 Claude Code cuts server instructions, and any tool description it loads
 upfront, at 4,096 characters. The limits below leave headroom.
+
+AGENTS.md loads on every turn for agents changing the server, so its content
+and its routing table have separate budgets, and every reference doc must be
+reachable from it: an unlinked doc is rarely opened.
 """
 
 import ast
@@ -29,6 +33,14 @@ NOT_TOOL_NAMES = {"vcs_eval", "vcs_execute_code", "vcs_version"}
 
 TOOL_NAME = re.compile(r"(?<![\w-])vcs_[a-z_]+")
 TIPS_CALL = re.compile(r"vcs_tips\(\s*\\?[\"']([a-z0-9-]+)\\?[\"']\s*\)")
+
+REPO = Path(__file__).resolve().parent.parent
+AGENTS_FILE = REPO / "AGENTS.md"
+ROUTING_HEADING = "## Where to read next"
+AGENTS_CONTENT_LIMIT = 6000
+ROUTING_LIMIT = 2400
+ROUTING_ROWS_LIMIT = 20
+LOCAL_LINK = re.compile(r"\]\((?!https?:|#)([^)#\s]+)")
 
 
 def _tools():
@@ -109,3 +121,44 @@ def test_tips_topics_are_mentioned_where_agents_look():
 def test_topic_names_are_unique_ignoring_case():
     names = topic_names()
     assert len({n.lower() for n in names}) == len(names)
+
+
+def _agents_md() -> str:
+    return AGENTS_FILE.read_text(encoding="utf-8").replace("\r\n", "\n")
+
+
+def _routing_section(text: str) -> str:
+    start = text.find(ROUTING_HEADING)
+    assert start >= 0, f"AGENTS.md has no {ROUTING_HEADING!r} section"
+    end = text.find("\n## ", start + len(ROUTING_HEADING))
+    return text[start:] if end < 0 else text[start:end]
+
+
+def _cost(text: str) -> int:
+    """Characters an agent reads, ignoring line breaks so rewrapping costs nothing."""
+    return len(text.replace("\n", ""))
+
+
+def test_agents_md_content_fits():
+    text = _agents_md()
+    content = _cost(text) - _cost(_routing_section(text))
+    assert content <= AGENTS_CONTENT_LIMIT, "move depth into docs/ and add a routing row"
+
+
+def test_agents_md_routing_fits():
+    routing = _routing_section(_agents_md())
+    table = [line for line in routing.splitlines() if line.lstrip().startswith("|")]
+    header, separator, *rows = table
+    assert _cost(routing) <= ROUTING_LIMIT
+    assert len(rows) <= ROUTING_ROWS_LIMIT
+
+
+def test_agents_md_links_resolve():
+    missing = [t for t in LOCAL_LINK.findall(_agents_md()) if not (REPO / t).exists()]
+    assert not missing
+
+
+def test_every_doc_is_linked_from_agents_md():
+    linked = {(REPO / t).resolve() for t in LOCAL_LINK.findall(_agents_md())}
+    unlinked = [p.name for p in sorted((REPO / "docs").glob("*.md")) if p.resolve() not in linked]
+    assert not unlinked, "add a routing row for each doc in AGENTS.md"

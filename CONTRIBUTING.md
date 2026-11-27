@@ -7,7 +7,7 @@ dependencies, and publishing a release.
 ## Development environment
 
 Day-to-day development uses the editable install in `venv/` described in
-[AGENTS.md](AGENTS.md#development-environment-setup):
+[AGENTS.md](AGENTS.md#development-workflow):
 
 ```powershell
 python -m venv venv

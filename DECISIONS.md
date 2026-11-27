@@ -74,6 +74,49 @@ contradictory guidance.
 
 ---
 
+## 2026-11-27 — Budget AGENTS.md at 6,000 characters and move depth into docs/
+
+**Trigger**: `AGENTS.md` loads on every turn in any workspace that includes this
+repository, including sessions about the add-in's VBA. It had grown to about
+40,600 characters across 344 lines, more than five times the add-in's own entry
+file, and most of it described single modules: the Screenshots section alone
+was 5,600 characters.
+
+**Options explored**:
+- Trim in place with no ceiling: rejected. Every addition is reasonable on its
+  own, so the file ratchets back up; the add-in's entry file reached 934 lines
+  that way (add-in `docs/agent-docs-maintenance.md`, Part 2).
+- Move the depth into `vcs_tips` topics: rejected. Tips are for agents using the
+  server, and internals such as the ownership registry rules do not belong there.
+- A routing row per tips topic: rejected for one row pointing at the folder,
+  because listing the folder shows the topics.
+- Keep the environment-variable list in a doc: rejected. `.env.example` already
+  names every variable with its default, and two lists drift apart.
+- **Chosen**: the add-in's model, a budgeted entry file with a routing table into
+  `docs/`, enforced by a test.
+
+**Decision**: `tests/test_agent_text.py` caps `AGENTS.md` at 6,000 characters
+outside `## Where to read next`, caps that table at 2,400 characters and 20
+rows, and requires every local link to resolve and every `docs/*.md` to be
+linked. Characters are counted without line breaks, so rewrapping costs
+nothing. The entry file keeps the venv and test commands, the concurrency
+suite's trigger list, four invariants (agents never close Access windows, the
+installed add-in is never a target, one call at a time per database, Access
+stays visible), and the steps for adding a tool. Eight new docs hold the rest,
+moved largely verbatim. `.env.example` is the one list of environment variables.
+
+**What this rules out**: New `AGENTS.md` sections for one module's behaviour.
+An addition that breaks the content budget moves still-valid guidance into
+`docs/` in the same change. Revisit if agents keep missing a rule that lives
+only in `docs/`; that rule belongs among the invariants.
+
+**Relevant files**: `AGENTS.md`, `docs/architecture.md`, `docs/agent-text.md`,
+`docs/concurrency.md`, `docs/access-instances.md`, `docs/screenshots.md`,
+`docs/configuration.md`, `docs/addin-rebuild-and-tests.md`, `docs/logging.md`,
+`tests/test_agent_text.py`, `CONTRIBUTING.md`.
+
+---
+
 ## 2026-11-27 — Refuse work in a copy whose export folder is outside it; output_dir exports elsewhere
 
 **Trigger**: In a git worktree or clone of a project whose `ExportFolder` option is
